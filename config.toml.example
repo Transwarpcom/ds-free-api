@@ -1,4 +1,4 @@
 [account]
 email = "your_email@example.com"
 password = "your_password"
-token = "your_deepseek_token"
+token = "your_deepseek_token" # 非必须系统会自动管理
