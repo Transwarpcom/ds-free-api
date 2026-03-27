@@ -1,0 +1,44 @@
+name: Smoke Tests
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
+
+jobs:
+  smoke-test:
+    name: End-to-End Smoke Tests
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Create config.toml
+        env:
+          DEEPSEEK_EMAIL: ${{ secrets.DEEPSEEK_EMAIL }}
+          DEEPSEEK_PASSWORD: ${{ secrets.DEEPSEEK_PASSWORD }}
+        run: |
+          cat > config.toml << 'EOF'
+          [server]
+          host = "127.0.0.1"
+          port = 5001
+          reload = false
+          pool_size = 3
+          pool_acquire_timeout = 30.0
+
+          [account]
+          email = "${{ secrets.DEEPSEEK_EMAIL }}"
+          password = "${{ secrets.DEEPSEEK_PASSWORD }}"
+          token = ""
+          EOF
+
+      - name: Run smoke tests
+        run: uv run pytest tests/smoke -v
