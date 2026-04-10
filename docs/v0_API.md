@@ -4,7 +4,7 @@
 
 本服务是 DeepSeek Chat API 的透明代理，提供自动认证和 PoW 计算。
 
-**Base URL**: `http://localhost:5001/v0/chat`
+**Base URL**: `http://<host>:<port>/v0/chat`
 
 **设计原则**: 透传 + 最小包装，只在必要时添加认证和 PoW。
 
@@ -442,7 +442,26 @@ chat_session_id → last_response_message_id
 
 ## 认证
 
-服务端使用配置的单一账号自动认证，无需客户端提供 Authorization header。
+服务端会用 `[account]` 中的账号信息自动登录 DeepSeek 上游。
+
+本地接口鉴权支持三种来源：
+
+- `[auth].tokens`
+- `server.api_key`
+- 环境变量 `DEEPSEEK_WEB_AUTH_TOKENS_JSON` / `DEEPSEEK_WEB_API_KEY`
+
+如果 `auth.required = true`，则客户端访问 `/v0/*` 和 `/v1/*` 时必须额外提供本地 Bearer token，支持两种方式：
+
+- `Authorization: Bearer <token>`
+- `X-API-Key: <token>`
+
+如果 `auth.required = false` 且没有任何有效 token，则本地接口不做额外鉴权；但这只建议在 loopback 场景使用。
+
+生产环境建议把本地接口 token 放在 `runtime/app.env`，例如：
+
+```text
+DEEPSEEK_WEB_AUTH_TOKENS_JSON=[{"name":"prod-gateway","token":"...","enabled":true}]
+```
 
 ---
 

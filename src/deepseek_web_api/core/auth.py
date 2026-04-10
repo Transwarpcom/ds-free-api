@@ -5,7 +5,15 @@ import threading
 
 from curl_cffi import requests
 
-from .config import BASE_HEADERS, CONFIG, DEEPSEEK_LOGIN_URL, DEFAULT_IMPERSONATE, save_config
+from .config import (
+    DEEPSEEK_LOGIN_URL,
+    clear_persisted_account_token,
+    get_account_config,
+    get_base_headers,
+    get_default_impersonate,
+    get_persisted_account_token,
+    persist_account_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +26,13 @@ def init_single_account():
     """Initialize single account from config (lazy, no login)."""
     global _account
     if _account is None:
-        _account = CONFIG.get("account")
+        _account = get_account_config()
     if not _account:
         raise ValueError("No account configured")
-    # No auto-login - token will be obtained on first use
 
 
 def login() -> str:
-    """Login and get new token, then save to config."""
+    """Login and get new token, then save to the configured persistence layer."""
     global _account
     email = _account.get("email", "").strip()
     mobile = _account.get("mobile", "").strip()
@@ -49,9 +56,9 @@ def login() -> str:
     logger.info("[login] Attempting login...")
     resp = requests.post(
         DEEPSEEK_LOGIN_URL,
-        headers=BASE_HEADERS,
+        headers=get_base_headers(),
         json=payload,
-        impersonate=DEFAULT_IMPERSONATE,
+        impersonate=get_default_impersonate(),
     )
     data = resp.json()
     resp.close()
@@ -65,7 +72,6 @@ def login() -> str:
         logger.error("[login] Missing token in response")
         raise ValueError("Login failed: missing token")
 
-    # Save token to config for persistence
     _account["token"] = new_token
     _save_token(new_token)
 
@@ -74,72 +80,53 @@ def login() -> str:
 
 
 def _save_token(token: str):
-    """Save token to config file for persistence."""
+    """Persist token without forcing secrets back into config.toml."""
     try:
-        config = CONFIG.copy()
-        if "account" not in config:
-            config["account"] = {}
-        config["account"]["token"] = token
-        save_config(config)
-        logger.debug("[login] Token saved to config")
+        persist_account_token(token)
+        logger.debug("[login] Token persisted")
     except Exception as e:
         logger.warning(f"[login] Failed to save token: {e}")
 
 
 def invalidate_token():
-    """Invalidate current token, forcing refresh on next get_token().
-
-    Call this when API returns authentication errors (e.g., 40003).
-    """
+    """Invalidate current token, forcing refresh on next get_token()."""
     global _account
     if _account:
         _account.pop("token", None)
         logger.debug("[invalidate_token] Token invalidated in memory")
 
-    # Also clear from CONFIG to prevent reuse
     try:
-        from .config import CONFIG as current_config
-        if current_config.get("account"):
-            # Clear token from in-memory CONFIG ( critical for concurrent tests)
-            current_config["account"].pop("token", None)
-            # Save updated config to file
-            save_config(current_config)
-            logger.debug("[invalidate_token] Token invalidated in config")
+        clear_persisted_account_token()
+        logger.debug("[invalidate_token] Token invalidated in persistence layer")
     except Exception as e:
-        logger.warning(f"[invalidate_token] Failed to clear token from config: {e}")
+        logger.warning(f"[invalidate_token] Failed to clear persisted token: {e}")
 
 
 def get_token() -> str:
     """Get current token, login if needed (lazy initialization)."""
     global _account
 
-    # Fast path: already have valid token
     if _account and _account.get("token"):
         return _account["token"]
 
-    # Slow path: initialize and get token
     with _token_lock:
-        # Double-check after acquiring lock
         if _account and _account.get("token"):
             return _account["token"]
 
-        # Initialize account from config
         if _account is None:
-            _account = CONFIG.get("account")
+            _account = get_account_config()
             if not _account:
                 raise ValueError("No account configured")
 
-        # Check config for existing token
-        config_token = CONFIG.get("account", {}).get("token")
-        if config_token:
-            _account["token"] = config_token
-            logger.debug("[get_token] Loaded token from config")
-            return config_token
+        persisted_token = get_persisted_account_token()
+        if persisted_token:
+            _account["token"] = persisted_token
+            logger.debug("[get_token] Loaded token from persistence layer")
+            return persisted_token
 
-        # No token, need to login
         return login()
 
 
 def get_auth_headers() -> dict:
     """Get headers with authorization."""
-    return {**BASE_HEADERS, "authorization": f"Bearer {get_token()}"}
+    return {**get_base_headers(), "authorization": f"Bearer {get_token()}"}

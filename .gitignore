@@ -1,4 +1,7 @@
+uv.lock
 .venv
+.claude
+.serena
 .pytest_cache
 .ruff_cache
 __pycache__
@@ -7,12 +10,6 @@ __pycache__
 build
 dist
 config.toml
-**/*.wasm
-
-# 博斗残迹
-.claude
-.serena
-CLAUDE.md
-
-.sisyphus/
-**/AGENTS.md
+local_prod/config.prod.toml
+local_prod/access-info.md
+local_prod/runtime/

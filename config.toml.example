@@ -1,61 +1,50 @@
-# Docker 封装预留路径（通过环境变量覆盖）：
-# CONFIG_PATH: 配置文件路径，默认 config.toml
-
 # 日志级别: DEBUG, INFO, WARNING, ERROR
 log_level = "WARNING"
 
-# ===== 服务器绑定 =====
 [server]
-host = "127.0.0.1"  # 建议保持 loopback，仅本机访问；如需公网访问，必须配置 auth.tokens
-port = 5001
-reload = true
+host = "127.0.0.1"  # 建议保持 loopback，仅本机访问；可用环境变量 DEEPSEEK_WEB_HOST 覆盖
+port = 5001         # 可用环境变量 DEEPSEEK_WEB_PORT 覆盖
+reload = true       # 可用环境变量 DEEPSEEK_WEB_RELOAD 覆盖
+api_key = ""        # 旧版单 token 兼容入口；也可用环境变量 DEEPSEEK_WEB_API_KEY
+cors_origins = ["*"]  # 生产环境建议改成明确白名单
+cors_allow_credentials = false
+cors_allow_methods = ["*"]
+cors_allow_headers = ["*"]
+pool_size = 10              # 最大并发 DeepSeek session 数；超出时请求等待（环境变量: DEEPSEEK_WEB_POOL_SIZE）
+pool_acquire_timeout = 30.0 # 等待可用 session 的超时秒数，超时返回 503（环境变量: DEEPSEEK_WEB_POOL_ACQUIRE_TIMEOUT）
 
-# ===== CORS =====
-[cors]
-origins = ["*"]               # 生产环境建议改成明确白名单
-allow_credentials = false
-allow_methods = ["*"]
-allow_headers = ["*"]
-
-# ===== 鉴权 =====
 [auth]
-# 鉴权 token 列表；非空列表表示需要鉴权，空列表仅在 loopback 时允许
-# 非 loopback host 必须配置 token，否则启动会失败（fail-fast 安全机制）
+# required=true 时，即使 token 缺失也会拒绝所有 /v0 和 /v1 请求
+required = false
+
+# 鉴权 token 列表；保留为空时，可改由环境变量提供：
+# DEEPSEEK_WEB_AUTH_TOKENS_JSON=[{"name":"prod","token":"sk-xxx","enabled":true}]
 tokens = []
 # 示例（配置一个或多个 token）：
 # tokens = ["sk-prod-xxx", "sk-backup-yyy"]
 
-# ===== DeepSeek 专有配置 =====
 [account]
 email = "your_email@example.com"  # 邮箱登录（优先）
 mobile = ""                        # 手机号登录（email 为空时使用）
 area_code = "86"                  # 手机号区号，如 "86"
 password = "your_password"
 token = ""  # 非必须，系统会自动管理（首次使用后保存）
+# 生产环境更推荐改用以下环境变量：
+# DEEPSEEK_ACCOUNT_EMAIL / DEEPSEEK_ACCOUNT_PASSWORD / DEEPSEEK_ACCOUNT_TOKEN
 
 # 请求头配置
 [headers]
 Host = "chat.deepseek.com"
-User-Agent = "DeepSeek/1.3.0 Android/35"
+User-Agent = "DeepSeek/2.0.0 Android/35"
 Accept = "application/json"
 Accept-Encoding = "gzip"
 Content-Type = "application/json"
 x-client-platform = "android"
-x-client-version = "1.3.0"
+x-client-version = "2.0.0"
 x-client-locale = "zh_CN"
 accept-charset = "UTF-8"
 
 # 浏览器伪装
 [browser]
 impersonate = "safari15_3"  # safari15_3, chrome110, etc.
-
-# WASM PoW 模块（首次运行时自动下载）
-[wasm]
-url = "https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm"
-path = "core/deepseek.wasm"
-
-# ===== OpenAI 兼容层 session pool =====
-[session_pool]
-pool_size = 10              # 最大并发 DeepSeek session 数；超出时请求等待，超时返回 503
-pool_acquire_timeout = 30.0 # 等待可用 session 的超时秒数，超时返回 503
-max_idle_seconds = 300.0    # 空闲 session 超过此时间后被清理（每 max_idle_seconds/2 检查一次）
+# 也可改用环境变量 DEEPSEEK_BROWSER_IMPERSONATE
