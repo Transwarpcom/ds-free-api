@@ -52,6 +52,7 @@ pool_acquire_timeout = 30.0         # Seconds to wait for a free session before 
 max_idle_seconds = 300.0           # Idle session cleanup threshold (configurable)
 
 [auth]
+required = false                     # If true, /v0 and /v1 reject requests unless a valid local auth token is provided
 tokens = []                          # Configure one or more tokens to enable auth
 # Example: tokens = ["sk-prod-xxx", "sk-backup-yyy"]
 
@@ -77,14 +78,29 @@ token = ""                         # Optional, system will auto-manage (saved af
 - CORS is configurable via `[cors].*`. The default remains permissive for compatibility, but you should narrow `cors_origins` before exposing browser clients.
 - You should still run the service on `127.0.0.1` unless you intentionally expose it.
 
+## Production Deployment
+
+The repository now treats production as a three-part runtime model:
+
+- `runtime/config.toml` for non-sensitive settings
+- `runtime/app.env` for secrets and request fingerprint headers
+- `runtime/deepseek-session.token` for the refreshed DeepSeek login token
+
+For Ubuntu + Docker deployment, use:
+
+- [local_prod/README.md](./local_prod/README.md)
+- [local_prod/OPERATIONS.zh-CN.md](./local_prod/OPERATIONS.zh-CN.md)
+
 ## Models
 
 Available models via `/v1/models`:
 
 | Model | Description |
 |-------|-------------|
-| `deepseek-web-chat` | Standard chat model, thinking disabled |
-| `deepseek-web-reasoner` | Reasoning model with chain-of-thought thinking |
+| `deepseek-web-chat` | Fast mode (快速模式), thinking off |
+| `deepseek-web-expert` | Expert mode (专家模式), thinking off |
+| `deepseek-web-reasoner` | Fast mode + chain-of-thought thinking |
+| `deepseek-web-expert-reasoner` | Expert mode + chain-of-thought thinking |
 
 **Note**: Internal search functionality is disabled by default (no web search).
 
@@ -140,7 +156,8 @@ OpenAI-compatible chat completions endpoint with full tool calling support and s
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `search_enabled` | bool | `false` | Enable DeepSeek web backend's search feature |
-| `thinking_enabled` | bool | `true` for reasoner model, `false` for chat | Enable thinking. For `deepseek-web-chat`: enables thinking output; for `deepseek-web-reasoner`: set to `false` to disable thinking |
+| `thinking_enabled` | bool | `true` for reasoner model, `false` for others | Enable thinking/chain-of-thought output |
+| `model_type` | string | derived from model name | Override mode: `"default"` (快速模式) or `"expert"` (专家模式) |
 
 Example with OpenAI SDK:
 ```python

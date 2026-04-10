@@ -1,194 +1,233 @@
 # Core 模块文档
 
-Core 是项目的**纯技术/基础设施层**，不包含业务逻辑。所有模块均提供线程安全或异步安全的实现。
+Core 是项目的基础设施层，负责：
 
----
+- 配置读取与持久化
+- 登录态管理
+- PoW 计算
+- 本地接口鉴权
+- 启动期安全提示
+- 会话状态存储
 
-## 1. config.py - 配置管理
+## 1. `config.py` - 配置管理
 
-### 实现原理
+### 当前配置模型
 
-使用 Python 标准库 `tomllib`（3.11+）或 `tomli` 解析 TOML 配置文件。模块加载时执行一次 `load_config()`，将配置缓存到全局 `CONFIG` 字典。
+项目支持两类来源：
 
-**配置文件结构**：
+1. `config.toml`
+   适合本地开发或兼容旧配置
+2. 环境变量
+   适合生产环境，尤其是敏感配置
 
-```toml
-[account]           # 账号信息
-email = "..."
-password = "..."
-token = "..."      # 登录后自动填充
+生产环境推荐三段式运行模型：
 
-[auth]             # 服务端鉴权（简化配置）
-tokens = ["sk-...", "sk-..."]  # 字符串数组，非空则启用鉴权
-
-[headers]          # HTTP 请求头（透传给 DeepSeek）
-Host = "chat.deepseek.com"
-User-Agent = "DeepSeek/1.3.0 Android/35"
-...
-
-[browser]          # 浏览器伪装
-impersonate = "safari15_3"
+```text
+runtime/config.toml
+runtime/app.env
+runtime/deepseek-session.token
 ```
+
+其中：
+
+- `runtime/config.toml`
+  保存监听、CORS、`auth.required`、session pool 等非敏感配置
+- `runtime/app.env`
+  保存 Bearer token、DeepSeek 账号、请求头指纹等敏感配置
+- `runtime/deepseek-session.token`
+  保存运行期自动刷新的 DeepSeek 登录态
+
+### 主要能力
+
+- 读取 `CONFIG_PATH` 指向的 TOML 配置
+- 兼容 `auth.tokens` 字符串数组与 token table 写法
+- 支持 `server.api_key` 旧版单 token 兼容模式
+- 支持 `DEEPSEEK_WEB_AUTH_TOKENS_JSON`、`DEEPSEEK_WEB_AUTH_TOKEN`
+- 支持 `DEEPSEEK_ACCOUNT_EMAIL`、`DEEPSEEK_ACCOUNT_PASSWORD` 等账号环境变量
+- 支持 `DEEPSEEK_BASE_HEADERS_JSON`
+- 支持 `DEEPSEEK_BROWSER_IMPERSONATE`
+- 支持 `DEEPSEEK_ACCOUNT_TOKEN_PATH` 将登录态单独持久化
+
+### 关键导出
+
+| 方法/变量 | 说明 |
+|------|------|
+| `CONFIG` | 模块加载时缓存的 TOML 配置 |
+| `CONFIG_PATH` | 配置文件路径 |
+| `ACCOUNT_TOKEN_PATH` | 登录态 token 文件路径 |
+| `load_config()` | 从磁盘读取 TOML |
+| `save_config(cfg)` | 将配置写回磁盘 |
+| `get_base_headers()` | 获取当前生效的上游请求头 |
+| `get_default_impersonate()` | 获取当前生效的浏览器伪装 |
+| `get_account_config()` | 汇总 TOML、环境变量与 token 文件后的账号配置 |
+| `get_persisted_account_token()` | 获取当前持久化登录态 |
+| `persist_account_token(token)` | 持久化登录态 |
+| `clear_persisted_account_token()` | 清除持久化登录态 |
+| `get_auth_token_entries()` | 获取完整鉴权 token 条目 |
+| `get_auth_tokens()` | 获取启用中的本地鉴权 token 值列表 |
+| `get_enabled_auth_tokens()` | 同 `get_auth_tokens()` |
+| `get_auth_required()` | 读取 `auth.required` |
+| `has_effective_auth_tokens()` | 判断是否存在有效 token |
+| `get_auth_mode_summary()` | 返回当前鉴权模式摘要 |
+| `get_pool_size()` | 读取 session pool 上限 |
+| `get_pool_acquire_timeout()` | 读取 session pool 等待超时 |
+| `get_server_host()` | 读取监听 host |
+| `get_server_port()` | 读取监听 port |
+| `get_server_reload()` | 读取 reload 配置 |
+| `get_cors_origins()` | 读取 CORS origins |
+| `get_cors_origin_regex()` | 读取 CORS origin regex |
+| `get_cors_allow_credentials()` | 读取 CORS credentials |
+| `get_cors_allow_methods()` | 读取 CORS methods |
+| `get_cors_allow_headers()` | 读取 CORS headers |
+| `BASE_HEADERS` | 模块级当前请求头快照 |
+| `DEFAULT_IMPERSONATE` | 模块级当前浏览器伪装快照 |
+
+## 2. `auth.py` - DeepSeek 登录态管理
+
+### 实现要点
+
+- 懒加载：启动时不主动登录
+- 首次调用 `get_token()` 才尝试读取 token 或登录
+- 优先顺序：
+  1. 内存中的 `_account["token"]`
+  2. `DEEPSEEK_ACCOUNT_TOKEN`
+  3. `DEEPSEEK_ACCOUNT_TOKEN_PATH` 指向的文件
+  4. `config.toml` 中的 `[account].token`
+  5. 重新登录
+- 登录成功后优先写入 token 文件；没有配置 token 文件时才回写 `config.toml`
+- 收到上游认证错误时通过 `invalidate_token()` 清空内存和持久化 token
 
 ### 导出方法
 
 | 方法 | 说明 |
 |------|------|
-| `CONFIG` | 全局配置字典（模块级变量） |
-| `load_config()` | 从 config.toml 重新加载配置 |
-| `save_config(cfg)` | 将配置写回 config.toml |
-| `CONFIG_PATH` | 配置文件路径，默认 `config.toml` |
-| `DEEPSEEK_HOST` | DeepSeek 域名常量 |
-| `DEEPSEEK_LOGIN_URL` | 登录 API 地址 |
-| `DEEPSEEK_CREATE_POW_URL` | PoW 挑战 API 地址 |
-| `BASE_HEADERS` | 从配置读取的 HTTP 请求头 |
-| `DEFAULT_IMPERSONATE` | 浏览器伪装标识 |
-| `get_wasm_url()` | 读取 `[wasm].url`，无则用默认 URL |
-| `get_wasm_path()` | 读取 `[wasm].path`，无则用默认路径 |
-| `get_auth_tokens()` | 读取 `auth.tokens` 字符串数组（非空则需要鉴权） |
-| `get_pool_size()` | 读取 `[session_pool].pool_size`（默认 10） |
-| `get_pool_acquire_timeout()` | 读取 `[session_pool].pool_acquire_timeout`（默认 30.0） |
-| `get_max_idle_seconds()` | 读取 `[session_pool].max_idle_seconds`（默认 300.0） |
-| `get_server_host()` | 读取 `[server].host` |
-| `get_server_port()` | 读取 `[server].port` |
-| `get_server_reload()` | 读取 `[server].reload` |
-| `get_cors_origins()` | 读取 `[cors].origins` |
-| `get_cors_allow_credentials()` | 读取 `[cors].allow_credentials` |
-| `get_cors_allow_methods()` | 读取 `[cors].allow_methods` |
-| `get_cors_allow_headers()` | 读取 `[cors].allow_headers` |
+| `init_single_account()` | 初始化账号配置，不主动登录 |
+| `login()` | 调用 DeepSeek 登录接口获取新 token |
+| `invalidate_token()` | 使当前 token 失效 |
+| `get_token()` | 获取当前 token，必要时自动登录 |
+| `get_auth_headers()` | 获取带 Authorization 的上游请求头 |
 
----
+## 3. `local_api_auth.py` - 本地接口鉴权
 
-## 2. logger.py - 日志输出
+### 实现要点
 
-### 实现原理
+本模块保护的是 `/v0/*` 和 `/v1/*` 这些“你自己的代理接口”，不是 DeepSeek 上游接口。
 
-使用 Python 标准 `logging` 模块，配合自定义 `ColoredFormatter` 实现终端彩色输出。
+支持：
 
-**日志级别颜色映射**：
-- DEBUG → 灰色
-- INFO → 蓝色
-- WARNING → 黄色
-- ERROR → 红色
+- `Authorization: Bearer <token>`
+- `X-API-Key: <token>`
+
+鉴权逻辑：
+
+- 若 `auth.required = false` 且没有任何有效 token，则本地接口开放
+- 只要 `auth.required = true`，请求必须带有效 token
+- 若配置了 token，即使 `auth.required = false`，带错 token 也会返回 `401`
 
 ### 导出方法
 
 | 方法 | 说明 |
 |------|------|
-| `setup_logger(name, level)` | 初始化带颜色的 logger |
-| `logger` | 默认 logger 实例 |
+| `requires_local_api_auth(path)` | 判断路径是否需要本地接口鉴权 |
+| `verify_local_api_auth(request)` | 校验 Bearer token / X-API-Key |
 
----
+## 4. `server_security.py` - 启动期安全检查
 
-## 3. auth.py - 身份认证
+### 实现要点
 
-### 实现原理
+- 启动时检查监听地址是否为 loopback
+- 非 loopback 且无本地接口鉴权时，直接 fail-fast 退出
+- 输出当前鉴权模式摘要
+- 输出常见风险提示，例如：
+  - `auth.required = true` 但没有有效 token
+  - CORS 仍为 `*`
+  - 服务监听在非 loopback 地址
 
-**懒加载**：启动时不登录，token 在首次调用 `get_token()` 时才获取。
+### 导出方法
 
-**token 持久化**：登录成功后自动保存到 config.toml，下次启动时从配置读取。
+| 方法 | 说明 |
+|------|------|
+| `is_loopback_host(host)` | 判断 host 是否为 loopback |
+| `validate_startup_config()` | 启动前做 fail-fast 安全检查 |
+| `collect_startup_security_warnings()` | 汇总告警文本 |
+| `log_startup_security_warnings()` | 输出启动期安全日志 |
 
-**自动刷新**：API 返回认证错误（code=40003）时，自动调用 `invalidate_token()` 使内存和配置文件中的 token 失效，下次请求时重新登录。
+## 5. `pow.py` - PoW 工作量证明
 
-**线程安全**：使用 `_token_lock` 保护 token 的获取和设置，避免竞态条件。
+### 实现要点
 
-```
+DeepSeek 网页端 API 要求大部分写操作附带 PoW。
+
 流程：
-1. get_token() 检查内存中的 _account["token"]
-2. 若无，检查 CONFIG["account"]["token"]
-3. 若无，调用 login() 获取新 token
-4. login() 成功后调用 _save_token() 持久化
-```
+
+1. 调用 `/api/v0/chat/create_pow_challenge`
+2. 用 WASM 计算答案
+3. 组装并 base64 编码后作为 `x-ds-pow-response`
+
+特性：
+
+- 首次加载后缓存 WASM 模块
+- 计算时复用缓存，避免重复初始化
+- 若获取 challenge 时发现 token 失效，会自动触发 token 刷新并重试
 
 ### 导出方法
 
 | 方法 | 说明 |
 |------|------|
-| `init_single_account()` | 初始化账号配置（懒加载，不登录） |
-| `login()` | 登录获取新 token，保存到配置 |
-| `_save_token(token)` | 将 token 持久化到 config.toml |
-| `invalidate_token()` | 使 token 失效（清除内存和配置） |
-| `get_token()` | 获取 token，必要时自动登录 |
-| `get_auth_headers()` | 获取带 Authorization 的完整请求头 |
+| `compute_pow_answer(...)` | 纯计算 PoW 答案 |
+| `get_pow_response(target_path)` | 获取可直接用于请求头的 PoW 响应 |
 
----
+## 6. `parent_msg_store.py` - 连续对话状态
 
-## 4. pow.py - PoW 工作量证明
+### 实现要点
 
-### 实现原理
+用于维护：
 
-DeepSeek API 要求每次请求携带 PoW 挑战答案。流程：
-
-```
-1. 调用 /api/v0/chat/create_pow_challenge 获取挑战
-2. 使用 WASM 模块计算答案（DeepSeekHashV1 算法）
-3. 将答案组装为特定格式，base64 编码后作为 x-ds-pow-response
+```text
+chat_session_id -> parent_message_id
 ```
 
-**WASM 模块缓存**：
-- 使用 `wasmtime` 加载 WASM 文件
-- 首次加载后缓存到 `_wasm_cache`，避免重复初始化
-- 线程安全：使用 `_cache_lock` 保护缓存写入
+场景：
 
-**WASM 计算过程**：
-1. 分配 WASM 内存，写入 challenge 和 prefix（`{salt}_{expire_at}_`）
-2. 调用 `wasm_solve()` 函数
-3. 从返回地址读取 status（4字节）和 value（8字节）
-4. status=0 表示计算失败，否则返回整数答案
+- `/v0/chat/completion` 连续对话
+- 根据上一次响应的 `response_message_id` 推导下一次请求的 `parent_message_id`
 
-**自动 token 刷新**：
-- `get_pow_response()` 内部捕获 40003 错误
-- 发现 token 无效时调用 `invalidate_token()` 并重试（最多2次）
+实现特性：
+
+- 单例模式
+- `asyncio.Lock` 保护
+- 所有读写接口均为异步
 
 ### 导出方法
 
 | 方法 | 说明 |
 |------|------|
-| `_ensure_wasm()` | 首次调用时从 URL 下载 WASM 文件到本地路径 |
-| `_get_cached_wasm(wasm_path)` | 获取/缓存 WASM 模块（线程安全） |
-| `compute_pow_answer(algorithm, challenge_str, salt, difficulty, expire_at, wasm_path?)` | 纯 WASM 计算 PoW 答案 |
-| `get_pow_response(target_path)` | 获取完整 PoW 响应（API + 计算），支持 token 自动刷新 |
-
----
-
-## 5. parent_msg_store.py - 会话状态管理
-
-### 实现原理
-
-DeepSeek API 要求连续对话时传递 `parent_message_id`。本模块维护内存映射表：
-
-```
-chat_session_id → parent_message_id
-```
-
-**单例模式**：使用双重检查锁定（double-checked locking）确保只创建一个实例。
-
-**异步安全**：使用 `asyncio.Lock` 保护所有读写操作。
-
-**数据流向**：
-1. 创建 session → `acreate(session_id)`，parent_message_id = null
-2. 收到响应 → `aupdate_parent_message_id(session_id, response_message_id)`
-3. 下一轮对话 → `aget_parent_message_id(session_id)` 获取上次的 message_id
-
-### 导出方法
-
-| 方法 | 说明 |
-|------|------|
-| `get_instance()` | 获取单例（同步，用于模块导入） |
-| `aget_instance()` | 获取单例（异步） |
-| `acreate(session_id)` | 创建新 session，parent_message_id 初始化为 null |
-| `aget_parent_message_id(session_id)` | 获取 session 对应的 parent_message_id |
+| `get_instance()` | 获取单例 |
+| `aget_instance()` | 异步获取单例 |
+| `acreate(session_id)` | 创建 session 记录 |
+| `aget_parent_message_id(session_id)` | 获取 parent_message_id |
 | `aupdate_parent_message_id(session_id, message_id)` | 更新 parent_message_id |
-| `adelete(session_id)` | 删除 session，返回是否存在 |
-| `ahas(session_id)` | 检查 session 是否存在 |
-| `aget_all()` | 获取所有 session ID 列表 |
+| `adelete(session_id)` | 删除 session |
+| `ahas(session_id)` | 判断 session 是否存在 |
+| `aget_all()` | 获取全部 session ID |
 
-> 注意：所有方法都是异步的，使用时需要 `await` 或 `asyncio.run()` 包装。
+## 7. `logger.py` - 日志输出
 
----
+### 实现要点
+
+- 使用 Python 标准 `logging`
+- 自定义彩色 formatter
+- 日志级别由 `config.py` 读取
+
+### 导出
+
+| 方法/变量 | 说明 |
+|------|------|
+| `setup_logger(name, level)` | 初始化 logger |
+| `logger` | 默认 logger 实例 |
 
 ## 开发约定
 
-1. **Core 层** - 只做技术实现，不包含业务逻辑
-2. **API/Service 层** - 编排 Core 能力，实现具体业务功能
-3. **Routes 层** - 薄路由，只做 HTTP 解析和响应封装
+1. Core 层只做基础设施，不塞业务编排
+2. API/Service 层负责把 Core 能力拼成业务流程
+3. 路由层尽量保持轻薄，只做 HTTP 解析和响应封装

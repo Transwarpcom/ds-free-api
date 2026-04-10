@@ -275,7 +275,9 @@ async def create_session(body: dict = None) -> tuple[str | None, Response]:
                 )
                 return None, resp
 
-            chat_session_id = biz_data.get("id")
+            chat_session_id = biz_data.get("id") or (
+                (biz_data.get("chat_session") or {}).get("id")
+            )
             if chat_session_id:
                 await ParentMsgStore.get_instance().acreate(chat_session_id)
                 data["chat_session_id"] = chat_session_id
@@ -364,6 +366,7 @@ async def stream_chat_completion(
     search_enabled: bool = True,
     thinking_enabled: bool = True,
     ref_file_ids: list | None = None,
+    model_type: str = "default",
 ):
     """Stream chat completion from DeepSeek and yield SSE bytes.
 
@@ -432,6 +435,7 @@ async def stream_chat_completion(
             "ref_file_ids": ref_file_ids or [],
             "search_enabled": search_enabled,
             "thinking_enabled": thinking_enabled,
+            "model_type": model_type,
         }
         headers = {"x-ds-pow-response": pow_response}
 
@@ -468,6 +472,7 @@ async def stream_edit_message(
     chat_session_id: str | None = None,
     search_enabled: bool = True,
     thinking_enabled: bool = True,
+    model_type: str = "default",
 ):
     """Stream edit message from DeepSeek and yield SSE bytes.
 
@@ -523,6 +528,7 @@ async def stream_edit_message(
             "prompt": prompt,
             "search_enabled": search_enabled,
             "thinking_enabled": thinking_enabled,
+            "model_type": model_type,
         }
         headers = {"x-ds-pow-response": pow_response}
 

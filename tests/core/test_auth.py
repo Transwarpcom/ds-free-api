@@ -20,14 +20,11 @@ class TestAuth:
         assert token == "test-token-123"
 
     @patch("deepseek_web_api.core.auth.login")
-    @patch("deepseek_web_api.core.auth.CONFIG", {"account": {"email": "", "password": "password"}})
-    def test_get_token_slow_path(self, mock_login):
+    @patch("deepseek_web_api.core.auth.get_persisted_account_token", return_value="")
+    def test_get_token_slow_path(self, mock_get_persisted_token, mock_login):
         """Test slow path when token needs to be initialized."""
-        # Setup: _account exists but no token, and CONFIG has no token
-        # Login should be called
         auth._account = {"email": "test@test.com", "password": "password"}
 
-        # Mock login to set the token (since mock doesn't run actual code)
         def mock_login_fn():
             auth._account["token"] = "new-token-456"
             return "new-token-456"
@@ -38,6 +35,7 @@ class TestAuth:
 
         assert token == "new-token-456"
         mock_login.assert_called_once()
+        mock_get_persisted_token.assert_called_once()
 
     def test_get_token_init_if_needed(self):
         """Test token initialization when _account is None."""

@@ -38,7 +38,7 @@ class TestChatCompletionsRoute:
         async def fake_get_pool():
             return fake_pool
 
-        async def fake_stream_generator(prompt, model_name, search_enabled, thinking_enabled, tools, session, stop_sequences=None, include_usage=False):
+        async def fake_stream_generator(prompt, model_name, search_enabled, thinking_enabled, tools, session, stop_sequences=None, include_usage=False, model_type="default"):
             captured["search_enabled"] = search_enabled
             yield (
                 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
@@ -73,7 +73,7 @@ class TestChatCompletionsRoute:
         async def fake_get_pool():
             return fake_pool
 
-        async def empty_stream_generator(prompt, model_name, search_enabled, thinking_enabled, tools, session, stop_sequences=None, include_usage=False):
+        async def empty_stream_generator(prompt, model_name, search_enabled, thinking_enabled, tools, session, stop_sequences=None, include_usage=False, model_type="default"):
             if False:
                 yield None
 
@@ -113,8 +113,12 @@ class TestChatCompletionsRoute:
             return FailingPool()
 
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
             lambda: [],
+        )
+        monkeypatch.setattr(
+            "deepseek_web_api.core.local_api_auth.get_auth_required",
+            lambda: False,
         )
         monkeypatch.setattr(
             "deepseek_web_api.api.openai.chat_completions.route.get_pool",

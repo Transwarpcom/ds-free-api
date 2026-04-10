@@ -1,9 +1,7 @@
 """Tests for API route-level middleware and auth behavior."""
 
-
 from fastapi.testclient import TestClient
 import pytest
-
 
 from deepseek_web_api import app
 from deepseek_web_api.api import routes
@@ -17,8 +15,12 @@ def client():
 class TestLocalApiAuthMiddleware:
     def test_root_endpoint_is_not_protected(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
             lambda: ["secret-token"],
+        )
+        monkeypatch.setattr(
+            "deepseek_web_api.core.local_api_auth.get_auth_required",
+            lambda: True,
         )
 
         response = client.get("/")
@@ -28,8 +30,27 @@ class TestLocalApiAuthMiddleware:
 
     def test_v1_models_requires_auth_when_token_configured(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
             lambda: ["secret-token"],
+        )
+        monkeypatch.setattr(
+            "deepseek_web_api.core.local_api_auth.get_auth_required",
+            lambda: False,
+        )
+
+        response = client.get("/v1/models")
+
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Invalid or missing local API key"
+
+    def test_v1_models_requires_auth_when_required_without_tokens(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
+            lambda: [],
+        )
+        monkeypatch.setattr(
+            "deepseek_web_api.core.local_api_auth.get_auth_required",
+            lambda: True,
         )
 
         response = client.get("/v1/models")
@@ -39,8 +60,12 @@ class TestLocalApiAuthMiddleware:
 
     def test_v1_models_accepts_bearer_token(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
             lambda: ["secret-token"],
+        )
+        monkeypatch.setattr(
+            "deepseek_web_api.core.local_api_auth.get_auth_required",
+            lambda: True,
         )
 
         response = client.get(
@@ -53,8 +78,12 @@ class TestLocalApiAuthMiddleware:
 
     def test_v1_models_accepts_x_api_key(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
             lambda: ["secret-token"],
+        )
+        monkeypatch.setattr(
+            "deepseek_web_api.core.local_api_auth.get_auth_required",
+            lambda: True,
         )
 
         response = client.get(
@@ -65,10 +94,14 @@ class TestLocalApiAuthMiddleware:
         assert response.status_code == 200
         assert response.json()["object"] == "list"
 
-    def test_v1_models_remains_open_when_no_tokens_configured(self, client, monkeypatch):
+    def test_v1_models_remains_open_when_auth_not_required_and_no_tokens(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
             lambda: [],
+        )
+        monkeypatch.setattr(
+            "deepseek_web_api.core.local_api_auth.get_auth_required",
+            lambda: False,
         )
 
         response = client.get("/v1/models")
@@ -78,8 +111,12 @@ class TestLocalApiAuthMiddleware:
 
     def test_v1_models_rejects_unknown_token(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
             lambda: ["valid-token"],
+        )
+        monkeypatch.setattr(
+            "deepseek_web_api.core.local_api_auth.get_auth_required",
+            lambda: True,
         )
 
         response = client.get(
@@ -92,8 +129,12 @@ class TestLocalApiAuthMiddleware:
 
     def test_v1_models_accepts_any_configured_token(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
             lambda: ["token-a", "token-b"],
+        )
+        monkeypatch.setattr(
+            "deepseek_web_api.core.local_api_auth.get_auth_required",
+            lambda: False,
         )
 
         response_a = client.get(

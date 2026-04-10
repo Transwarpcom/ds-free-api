@@ -47,6 +47,10 @@ class SessionPoolFullError(SessionPoolError):
     pass
 
 
+# Backward-compatibility alias
+AllSessionsBusyError = SessionPoolFullError
+
+
 class StatelessSessionPool:
     """Pool of sessions for stateless chat completions.
 
