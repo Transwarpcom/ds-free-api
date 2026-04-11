@@ -1,0 +1,31 @@
+# openai_adapter_cli 测试脚本
+
+# 查看 ds_core 账号池状态
+status
+
+# 基础非流式对话
+chat examples/openai_adapter_cli/basic_chat.json
+
+# 并发基础请求
+concurrent 3 examples/openai_adapter_cli/basic_chat.json
+
+# 基础流式对话（JSON 中已带 stream: true）
+chat examples/openai_adapter_cli/stream_options.json
+
+# reasoning + search
+chat examples/openai_adapter_cli/reasoning_search.json
+
+# 工具调用
+chat examples/openai_adapter_cli/tool_call.json
+
+# stop 序列
+chat examples/openai_adapter_cli/stop_sequence.json
+
+# raw 模式：透传原始输出
+chat examples/openai_adapter_cli/basic_chat.json --raw
+
+# 模型接口
+models
+model deepseek-default
+
+quit

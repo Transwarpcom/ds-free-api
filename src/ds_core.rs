@@ -1,6 +1,6 @@
 //! DeepSeek 核心模块 —— OpenAI API 到 DeepSeek 的适配层
 //!
-//! 对外暴露最小接口：DeepSeekCore, CoreError, ChatRequest, GuardedStream
+//! 对外暴露最小接口：DeepSeekCore, CoreError, ChatRequest
 
 mod accounts;
 mod client;
@@ -60,7 +60,8 @@ impl DeepSeekCore {
         let wasm_bytes = client.get_wasm().await?;
         let solver = PowSolver::new(&wasm_bytes)?;
 
-        let mut pool = AccountPool::new(config.accounts.clone());
+        let mut pool =
+            AccountPool::new(config.accounts.clone(), config.deepseek.model_types.clone());
         pool.init(&client, &solver).await.map_err(|e| match e {
             accounts::PoolError::AllAccountsFailed => {
                 CoreError::ProviderError("所有账号初始化失败".to_string())
@@ -84,9 +85,7 @@ impl DeepSeekCore {
         &self,
         req: ChatRequest,
     ) -> Result<
-        crate::ds_core::completions::GuardedStream<
-            Pin<Box<dyn futures::Stream<Item = Result<bytes::Bytes, CoreError>> + Send>>,
-        >,
+        Pin<Box<dyn futures::Stream<Item = Result<bytes::Bytes, CoreError>> + Send>>,
         CoreError,
     > {
         self.completions.v0_chat(req).await

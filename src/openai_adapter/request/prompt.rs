@@ -3,7 +3,7 @@
 //! 若请求包含工具定义或行为指令，会追加到最后一条 user 消息中。
 //! 最终以 assistant 角色前缀引导模型生成回复。
 
-use crate::openai_adapter::request::tools::ToolContext;
+use super::tools::ToolContext;
 use crate::openai_adapter::types::{ChatCompletionRequest, ContentPart, Message, MessageContent};
 
 const IM_START: &str = "<|im_start|>";

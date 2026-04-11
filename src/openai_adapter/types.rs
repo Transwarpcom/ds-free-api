@@ -2,6 +2,22 @@
 //!
 //! 原则：接口层面全对齐，无法实现的字段解析后忽略。
 
+#![allow(dead_code)]
+// 说明：本文件包含大量 OpenAI 兼容字段，其中仅以下字段/类型在 request/response 中被实际消费。
+//
+// request  层直接使用：
+//   ChatCompletionRequest.model, messages, stream, stop, tools, tool_choice,
+//   parallel_tool_calls, web_search_options, reasoning_effort
+//   涉及子类型：Message / MessageContent / ContentPart / StopSequence / Tool /
+//   FunctionDefinition / CustomTool / CustomToolFormat / GrammarDefinition /
+//   ToolChoice / AllowedToolsChoice / AllowedTools / NamedToolChoice /
+//   NamedFunction / NamedCustomChoice / NamedCustom / FunctionCallOption /
+//   FunctionCallNamed / ResponseFormat / StreamOptions / WebSearchOptions
+//
+// response 层直接使用：
+//   ChatCompletion / Choice / MessageResponse / ChatCompletionChunk /
+//   ChunkChoice / Delta / Usage / ToolCall / FunctionCall / Model / ModelList
+
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -344,7 +360,7 @@ pub struct ResponseFormat {
     pub json_schema: Option<serde_json::Value>,
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
@@ -353,7 +369,7 @@ fn default_true() -> bool {
 pub struct StreamOptions {
     #[serde(default)]
     pub include_usage: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::openai_adapter::types::default_true")]
     pub include_obfuscation: bool,
 }
 

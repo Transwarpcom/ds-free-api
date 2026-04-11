@@ -17,6 +17,7 @@ pub struct ChatRequest {
     pub prompt: String,
     pub thinking_enabled: bool,
     pub search_enabled: bool,
+    pub model_type: String,
 }
 
 pin_project! {
@@ -75,24 +76,28 @@ impl Completions {
     pub async fn v0_chat(
         &self,
         req: ChatRequest,
-    ) -> Result<
-        GuardedStream<Pin<Box<dyn Stream<Item = Result<Bytes, CoreError>> + Send>>>,
-        CoreError,
-    > {
-        let guard = self.pool.get_account().ok_or(CoreError::Overloaded)?;
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, CoreError>> + Send>>, CoreError> {
+        let guard = self
+            .pool
+            .get_account(&req.model_type)
+            .ok_or(CoreError::Overloaded)?;
 
         let account = guard.account();
         let token = account.token().to_string();
-        let session_id = account.session_id();
+        let session_id = account
+            .session_id(&req.model_type)
+            .expect("初始化时已保证存在该 model_type 的 session")
+            .to_string();
 
         let pow_header = self.compute_pow(&token).await?;
 
         let payload = EditMessagePayload {
-            chat_session_id: session_id.to_string(),
+            chat_session_id: session_id,
             message_id: 1,
             prompt: req.prompt,
             search_enabled: req.search_enabled,
             thinking_enabled: req.thinking_enabled,
+            model_type: req.model_type.clone(),
         };
 
         let stream = self
@@ -101,7 +106,7 @@ impl Completions {
             .await?
             .map_err(|e| CoreError::ProviderError(e.to_string()));
 
-        Ok(GuardedStream::new(Box::pin(stream), guard))
+        Ok(Box::pin(GuardedStream::new(stream, guard)))
     }
 
     async fn compute_pow(&self, token: &str) -> Result<String, CoreError> {

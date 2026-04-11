@@ -26,7 +26,7 @@ fn next_call_id() -> String {
 ///
 /// 输入示例:
 /// `<tool_calls><tool_call name="get_weather" arguments="{&quot;city&quot;:&quot;北京&quot;}" /></tool_calls>`
-pub fn parse_tool_calls(xml: &str) -> Option<Vec<ToolCall>> {
+pub fn parse_tool_calls(xml: &str) -> Option<(Vec<ToolCall>, String)> {
     let start = xml.find("<tool_calls>")?;
     let end = xml.find("</tool_calls>")? + "</tool_calls>".len();
     let inner = &xml[start + "<tool_calls>".len()..end - "</tool_calls>".len()];
@@ -55,7 +55,12 @@ pub fn parse_tool_calls(xml: &str) -> Option<Vec<ToolCall>> {
         });
     }
 
-    if calls.is_empty() { None } else { Some(calls) }
+    if calls.is_empty() {
+        return None;
+    }
+
+    let remaining = xml[..start].to_string() + &xml[end..];
+    Some((calls, remaining))
 }
 
 fn extract_attr(tag: &str, key: &str) -> Option<String> {
@@ -174,7 +179,7 @@ where
                                     let tail = buf.split_off(end_pos);
                                     *this.state = ToolParseState::PlainText;
 
-                                    if let Some(calls) = parse_tool_calls(&collected) {
+                                    if let Some((calls, _)) = parse_tool_calls(&collected) {
                                         debug!(
                                             target: "adapter",
                                             "tool_parser 解析出 {} 个工具调用",
@@ -215,7 +220,7 @@ where
                         if let ToolParseState::CollectingXml(buf) =
                             std::mem::replace(this.state, ToolParseState::PlainText)
                         {
-                            if let Some(calls) = parse_tool_calls(&buf) {
+                            if let Some((calls, _)) = parse_tool_calls(&buf) {
                                 choice.delta.tool_calls = Some(calls);
                                 if choice.finish_reason == Some("stop") {
                                     choice.finish_reason = Some("tool_calls");
@@ -237,7 +242,7 @@ where
                         std::mem::replace(this.state, ToolParseState::PlainText)
                     {
                         // 流结束时必须清空缓冲，避免未发射的 XML 内容丢失
-                        if let Some(calls) = parse_tool_calls(&buf) {
+                        if let Some((calls, _)) = parse_tool_calls(&buf) {
                             let chunk = make_end_chunk(
                                 this.model,
                                 Delta {
@@ -278,7 +283,8 @@ mod tests {
     #[test]
     fn parse_simple_xml_tool() {
         let xml = r#"<tool_calls><tool_call name="get_weather" arguments="{&quot;city&quot;:&quot;北京&quot;}" /></tool_calls>"#;
-        let calls = parse_tool_calls(xml).unwrap();
+        let (calls, remaining) = parse_tool_calls(xml).unwrap();
+        assert!(remaining.is_empty());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.as_ref().unwrap().name, "get_weather");
         assert_eq!(
@@ -290,7 +296,8 @@ mod tests {
     #[test]
     fn parse_single_quote_args() {
         let xml = r#"<tool_calls><tool_call name="get_weather" arguments='{&quot;city&quot;:&quot;北京&quot;}' /></tool_calls>"#;
-        let calls = parse_tool_calls(xml).unwrap();
+        let (calls, remaining) = parse_tool_calls(xml).unwrap();
+        assert!(remaining.is_empty());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.as_ref().unwrap().name, "get_weather");
         assert_eq!(
@@ -302,12 +309,22 @@ mod tests {
     #[test]
     fn parse_multiple_tools_with_index() {
         let xml = r#"<tool_calls><tool_call name="get_weather" arguments="{}" /><tool_call name="get_time" arguments="{&quot;tz&quot;:&quot;bj&quot;}" /></tool_calls>"#;
-        let calls = parse_tool_calls(xml).unwrap();
+        let (calls, remaining) = parse_tool_calls(xml).unwrap();
+        assert!(remaining.is_empty());
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].index, 0);
         assert_eq!(calls[0].function.as_ref().unwrap().name, "get_weather");
         assert_eq!(calls[1].index, 1);
         assert_eq!(calls[1].function.as_ref().unwrap().name, "get_time");
+    }
+
+    #[test]
+    fn parse_tool_calls_with_trailing_text() {
+        let xml = r#"<tool_calls><tool_call name="get_weather" arguments="{}" /></tool_calls> trailing text"#;
+        let (calls, remaining) = parse_tool_calls(xml).unwrap();
+        assert_eq!(remaining, " trailing text");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.as_ref().unwrap().name, "get_weather");
     }
 
     #[tokio::test]

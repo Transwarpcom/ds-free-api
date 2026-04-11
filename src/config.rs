@@ -47,6 +47,9 @@ pub struct DeepSeekConfig {
     /// X-Client-Platform 请求头
     #[serde(default = "default_client_platform")]
     pub client_platform: String,
+    /// 定义支持的模型类型列表，每种类型会自动映射为 OpenAI 的 model_id：deepseek-<type>
+    #[serde(default = "default_model_types")]
+    pub model_types: Vec<String>,
 }
 
 impl Default for DeepSeekConfig {
@@ -57,7 +60,25 @@ impl Default for DeepSeekConfig {
             user_agent: default_user_agent(),
             client_version: default_client_version(),
             client_platform: default_client_platform(),
+            model_types: default_model_types(),
         }
+    }
+}
+
+fn default_model_types() -> Vec<String> {
+    vec!["default".to_string(), "expert".to_string()]
+}
+
+impl DeepSeekConfig {
+    /// 生成 OpenAI 模型注册表映射
+    ///
+    /// key 为小写的 model_id（如 deepseek-default），value 为内部 model_type（如 default）
+    pub fn model_registry(&self) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        for ty in &self.model_types {
+            map.insert(format!("deepseek-{}", ty).to_lowercase(), ty.clone());
+        }
+        map
     }
 }
 
@@ -97,7 +118,7 @@ impl Config {
 
     /// 解析命令行参数并加载配置
     ///
-    /// 支持 `-c <path>` 指定配置文件路径，默认使用 `../config.toml`
+    /// 支持 `-c <path>` 指定配置文件路径，默认使用 `config.toml`
     pub fn load_with_args(args: impl Iterator<Item = String>) -> Result<Self, ConfigError> {
         let mut config_path = None;
         let mut iter = args.skip(1); // 跳过程序名
@@ -120,6 +141,9 @@ impl Config {
     fn validate(&self) -> Result<(), ConfigError> {
         if self.accounts.is_empty() {
             return Err(ConfigError::Validation("至少需要一个账号配置".to_string()));
+        }
+        if self.deepseek.model_types.is_empty() {
+            return Err(ConfigError::Validation("model_types 不能为空".to_string()));
         }
         Ok(())
     }

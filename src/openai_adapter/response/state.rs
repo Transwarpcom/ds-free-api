@@ -7,7 +7,8 @@ use futures::Stream;
 use pin_project_lite::pin_project;
 
 use crate::openai_adapter::OpenAIAdapterError;
-use crate::openai_adapter::response::sse_parser::SseEvent;
+
+use super::sse_parser::SseEvent;
 
 const FRAG_THINK: &str = "THINK";
 const FRAG_RESPONSE: &str = "RESPONSE";

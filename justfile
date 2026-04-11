@@ -17,3 +17,7 @@ test-adapter-request *ARGS:
 # Run openai_adapter/response submodule tests
 test-adapter-response *ARGS:
   cargo test openai_adapter::response -- {{ARGS}}
+
+# Run openai_adapter_cli example
+openai-adapter-cli *ARGS:
+  cargo run --example openai_adapter_cli -- {{ARGS}}

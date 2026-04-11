@@ -4,8 +4,11 @@
 # 查看账号状态
 status
 
-# 简单对话
-chat 你好，请介绍一下 Rust 语言 false false
+# 切换模型类型 (默认取 config 第一项)
+model expert
+
+# 简单对话 (thinking=false, search=false 可省略)
+chat 你好，请介绍一下 Rust 语言
 
 # 启用思考模式
 chat 解释所有权和借用的关系 true false
@@ -16,8 +19,14 @@ chat Rust 最新版本有什么新特性 false true
 # 双开
 chat Rust 异步运行时对比 true true
 
+# raw 模式：不透传聚合，直接逐字节输出原始 SSE
+chat 你好 --raw
+
 # 并发测试：同时发起 3 个请求
 concurrent 3 你好，请简短回复 true false
+
+# 并发 raw 模式
+concurrent 2 你好，请简短回复 true false --raw
 
 # 退出
 quit

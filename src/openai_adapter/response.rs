@@ -4,14 +4,18 @@
 //! - 仅 THINK / RESPONSE 片段映射到用户可见文本
 //! - obfuscation 在最终 SSE 序列化阶段动态注入
 
-pub mod converter;
-pub mod sse_parser;
-pub mod state;
-pub mod tool_parser;
+mod converter;
+mod sse_parser;
+mod state;
+mod tool_parser;
+
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use log::debug;
+use pin_project_lite::pin_project;
 
 use crate::openai_adapter::{
     OpenAIAdapterError, StreamResponse,
@@ -67,20 +71,99 @@ fn chunk_to_bytes(
     Ok(Bytes::from(format!("data: {}\n\n", json_text)))
 }
 
+fn find_stop_pos(content: &str, stop: &[String]) -> Option<usize> {
+    stop.iter().filter_map(|s| content.find(s)).min()
+}
+
+pin_project! {
+    struct StopStream<S> {
+        #[pin]
+        inner: S,
+        stop: Vec<String>,
+        stopped: bool,
+        sent_len: usize,
+        buffer: String,
+        include_obfuscation: bool,
+    }
+}
+
+impl<S> Stream for StopStream<S>
+where
+    S: Stream<Item = Result<ChatCompletionChunk, OpenAIAdapterError>>,
+{
+    type Item = Result<Bytes, OpenAIAdapterError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+        loop {
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                Poll::Ready(Some(Ok(mut chunk))) => {
+                    if *this.stopped {
+                        if chunk.choices.is_empty() && chunk.usage.is_some() {
+                            return Poll::Ready(Some(chunk_to_bytes(
+                                chunk,
+                                *this.include_obfuscation,
+                            )));
+                        }
+                        // 允许 finish_reason 从 stop 升级为 tool_calls
+                        if let Some(choice) = chunk.choices.first_mut()
+                            && choice.delta.content.is_none()
+                            && choice.delta.reasoning_content.is_none()
+                            && choice.delta.tool_calls.is_none()
+                            && choice.finish_reason == Some(FINISH_TOOL_CALLS)
+                        {
+                            return Poll::Ready(Some(chunk_to_bytes(
+                                chunk,
+                                *this.include_obfuscation,
+                            )));
+                        }
+                        continue;
+                    }
+
+                    if let Some(choice) = chunk.choices.first_mut()
+                        && let Some(ref content) = choice.delta.content
+                    {
+                        this.buffer.push_str(content);
+                        if let Some(pos) = find_stop_pos(this.buffer, this.stop) {
+                            let truncated = &this.buffer[*this.sent_len..pos];
+                            if truncated.is_empty() {
+                                choice.delta.content = None;
+                            } else {
+                                choice.delta.content = Some(truncated.to_string());
+                            }
+                            choice.finish_reason = Some(FINISH_STOP);
+                            *this.stopped = true;
+                            this.buffer.clear();
+                            *this.sent_len = pos;
+                        } else {
+                            *this.sent_len = this.buffer.len();
+                        }
+                    }
+                    return Poll::Ready(Some(chunk_to_bytes(chunk, *this.include_obfuscation)));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
 /// 流式响应：把 ds_core 字节流转换为 OpenAI SSE 字节流
 pub fn stream<S>(
     ds_stream: S,
     model: String,
     include_usage: bool,
     include_obfuscation: bool,
+    stop: Vec<String>,
 ) -> StreamResponse
 where
     S: Stream<Item = Result<Bytes, crate::ds_core::CoreError>> + Send + 'static,
 {
     debug!(
         target: "adapter",
-        "构建流式响应: model={}, include_usage={}, include_obfuscation={}",
-        model, include_usage, include_obfuscation
+        "构建流式响应: model={}, include_usage={}, include_obfuscation={}, stop_count={}",
+        model, include_usage, include_obfuscation, stop.len()
     );
     let sse = sse_parser::SseStream::new(ds_stream);
     let state_stream = state::StateStream::new(sse);
@@ -91,18 +174,27 @@ where
         include_obfuscation,
     );
     let tool_parsed = tool_parser::ToolCallStream::new(converted, model);
-    Box::pin(tool_parsed.map(move |res| match res {
-        Ok(chunk) => chunk_to_bytes(chunk, include_obfuscation),
-        Err(e) => Err(e),
-    }))
+    let stop_stream = StopStream {
+        inner: tool_parsed,
+        stop,
+        stopped: false,
+        sent_len: 0,
+        buffer: String::new(),
+        include_obfuscation,
+    };
+    Box::pin(stop_stream)
 }
 
 /// 非流式响应：聚合 SSE 流为单个 ChatCompletion JSON
-pub async fn aggregate<S>(ds_stream: S, model: String) -> Result<Vec<u8>, OpenAIAdapterError>
+pub async fn aggregate<S>(
+    ds_stream: S,
+    model: String,
+    stop: Vec<String>,
+) -> Result<Vec<u8>, OpenAIAdapterError>
 where
     S: Stream<Item = Result<Bytes, crate::ds_core::CoreError>> + Send,
 {
-    debug!(target: "adapter", "构建非流式响应: model={}", model);
+    debug!(target: "adapter", "构建非流式响应: model={}, stop_count={}", model, stop.len());
     let sse = sse_parser::SseStream::new(ds_stream);
     let state_stream = state::StateStream::new(sse);
     let converted = converter::ConverterStream::new(state_stream, model.clone(), true, false);
@@ -131,9 +223,29 @@ where
         }
     }
 
-    let (message_content, tool_calls) = if let Some(calls) = tool_parser::parse_tool_calls(&content)
+    let stop_pos = if !stop.is_empty() {
+        find_stop_pos(&content, &stop)
+    } else {
+        None
+    };
+
+    let parsed = tool_parser::parse_tool_calls(&content);
+
+    // stop 截断（仅非 tool_calls 路径）
+    if let Some(pos) = stop_pos
+        && parsed.is_none()
     {
-        (None, Some(calls))
+        content.truncate(pos);
+        finish_reason = Some(FINISH_STOP.to_string());
+    }
+
+    let (message_content, tool_calls) = if let Some((calls, remaining)) = parsed {
+        let tail = remaining.trim();
+        if tail.is_empty() {
+            (None, Some(calls))
+        } else {
+            (Some(tail.to_string()), Some(calls))
+        }
     } else {
         let c = if content.is_empty() {
             None
@@ -143,10 +255,9 @@ where
         (c, None)
     };
 
-    let is_stop = finish_reason.as_deref() == Some(FINISH_STOP);
     let final_reason: Option<&'static str> = if tool_calls.is_some() {
         Some(FINISH_TOOL_CALLS)
-    } else if is_stop {
+    } else if finish_reason.as_deref() == Some(FINISH_STOP) {
         Some(FINISH_STOP)
     } else {
         None
@@ -213,7 +324,9 @@ mod tests {
             data: {\"p\":\"response/status\",\"v\":\"FINISHED\"}\n\n\
             event: finish\ndata: {}\n\n";
         let stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let json = aggregate(stream, "deepseek-default".into()).await.unwrap();
+        let json = aggregate(stream, "deepseek-default".into(), vec![])
+            .await
+            .unwrap();
         let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
         println!("\n=== AGGREGATED RESPONSE (plain_text) ===");
         println!("{}", serde_json::to_string_pretty(&completion).unwrap());
@@ -238,7 +351,9 @@ mod tests {
             data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"answer\"}\n\n\
             event: finish\ndata: {}\n\n";
         let stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let json = aggregate(stream, "deepseek-expert".into()).await.unwrap();
+        let json = aggregate(stream, "deepseek-expert".into(), vec![])
+            .await
+            .unwrap();
         let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
         println!("\n=== AGGREGATED RESPONSE (thinking) ===");
         println!("{}", serde_json::to_string_pretty(&completion).unwrap());
@@ -258,7 +373,9 @@ mod tests {
             data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"<tool_calls><tool_call name=\\\"get_weather\\\" arguments=\\\"{&quot;city&quot;:&quot;beijing&quot;}\\\" /></tool_calls>\"}\n\n\
             event: finish\ndata: {}\n\n";
         let stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let json = aggregate(stream, "deepseek-default".into()).await.unwrap();
+        let json = aggregate(stream, "deepseek-default".into(), vec![])
+            .await
+            .unwrap();
         let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
         println!("\n=== AGGREGATED RESPONSE (tool_calls) ===");
         println!("{}", serde_json::to_string_pretty(&completion).unwrap());
@@ -271,6 +388,34 @@ mod tests {
         assert_eq!(calls[0]["type"], "function");
         assert_eq!(calls[0]["function"]["name"], "get_weather");
         assert_eq!(calls[0]["function"]["arguments"], r#"{"city":"beijing"}"#);
+        assert_eq!(completion["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    #[tokio::test]
+    async fn aggregate_tool_calls_with_trailing_text() {
+        let fixture = "event: ready\ndata: {}\n\n\
+            data: {\"v\":{\"response\":{\"fragments\":[{\"type\":\"RESPONSE\",\"content\":\"\"}]}}}\n\n\
+            data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"<tool_calls><tool_call name=\\\"get_weather\\\" arguments=\\\"{}\\\" /></tool_calls> trailing text\"}\n\n\
+            event: finish\ndata: {}\n\n";
+        let stream = futures::stream::iter(vec![sse_bytes(fixture)]);
+        let json = aggregate(stream, "deepseek-default".into(), vec![])
+            .await
+            .unwrap();
+        let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        println!("\n=== AGGREGATED RESPONSE (tool_calls + trailing text) ===");
+        println!("{}", serde_json::to_string_pretty(&completion).unwrap());
+        println!("========================================================\n");
+        assert_eq!(
+            completion["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap(),
+            "trailing text"
+        );
+        let calls = completion["choices"][0]["message"]["tool_calls"]
+            .as_array()
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], "get_weather");
         assert_eq!(completion["choices"][0]["finish_reason"], "tool_calls");
     }
 
@@ -297,7 +442,14 @@ mod tests {
             data: {\"p\":\"response/status\",\"v\":\"FINISHED\"}\n\n\
             event: finish\ndata: {}\n\n";
         let bytes_stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let chunks = collect_chunks(super::stream(bytes_stream, "m".into(), false, false)).await;
+        let chunks = collect_chunks(super::stream(
+            bytes_stream,
+            "m".into(),
+            false,
+            false,
+            vec![],
+        ))
+        .await;
         println!("\n=== STREAM CHUNKS (plain_text) ===");
         for (i, c) in chunks.iter().enumerate() {
             println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
@@ -318,7 +470,8 @@ mod tests {
             data: {\"p\":\"response/status\",\"v\":\"FINISHED\"}\n\n\
             event: finish\ndata: {}\n\n";
         let bytes_stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let chunks = collect_chunks(super::stream(bytes_stream, "m".into(), true, false)).await;
+        let chunks =
+            collect_chunks(super::stream(bytes_stream, "m".into(), true, false, vec![])).await;
         println!("\n=== STREAM CHUNKS (include_usage) ===");
         for (i, c) in chunks.iter().enumerate() {
             println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
@@ -340,7 +493,14 @@ mod tests {
             data: {\"p\":\"response/status\",\"v\":\"FINISHED\"}\n\n\
             event: finish\ndata: {}\n\n";
         let bytes_stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let chunks = collect_chunks(super::stream(bytes_stream, "m".into(), false, false)).await;
+        let chunks = collect_chunks(super::stream(
+            bytes_stream,
+            "m".into(),
+            false,
+            false,
+            vec![],
+        ))
+        .await;
         println!("\n=== STREAM CHUNKS (tool_calls) ===");
         for (i, c) in chunks.iter().enumerate() {
             println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
@@ -370,7 +530,14 @@ mod tests {
             data: {\"p\":\"response/status\",\"v\":\"FINISHED\"}\n\n\
             event: finish\ndata: {}\n\n";
         let bytes_stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let chunks = collect_chunks(super::stream(bytes_stream, "m".into(), false, false)).await;
+        let chunks = collect_chunks(super::stream(
+            bytes_stream,
+            "m".into(),
+            false,
+            false,
+            vec![],
+        ))
+        .await;
         println!("\n=== STREAM CHUNKS (fragmented_tool_calls_with_thinking) ===");
         for (i, c) in chunks.iter().enumerate() {
             println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
@@ -405,7 +572,14 @@ mod tests {
             data: {\"p\":\"response/status\",\"v\":\"FINISHED\"}\n\n\
             event: finish\ndata: {}\n\n";
         let bytes_stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let chunks = collect_chunks(super::stream(bytes_stream, "m".into(), false, false)).await;
+        let chunks = collect_chunks(super::stream(
+            bytes_stream,
+            "m".into(),
+            false,
+            false,
+            vec![],
+        ))
+        .await;
         println!("\n=== STREAM CHUNKS (tool_search_and_open) ===");
         for (i, c) in chunks.iter().enumerate() {
             println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
@@ -433,7 +607,8 @@ mod tests {
             data: {\"p\":\"response/status\",\"v\":\"FINISHED\"}\n\n\
             event: finish\ndata: {}\n\n";
         let bytes_stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let chunks = collect_chunks(super::stream(bytes_stream, "m".into(), false, true)).await;
+        let chunks =
+            collect_chunks(super::stream(bytes_stream, "m".into(), false, true, vec![])).await;
         println!("\n=== STREAM CHUNKS (include_obfuscation) ===");
         for (i, c) in chunks.iter().enumerate() {
             println!(

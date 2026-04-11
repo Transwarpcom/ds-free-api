@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! OpenAI 协议适配层 —— OpenAI JSON 与 ds_core 内部格式的双向转换
 //!
 //! 本模块负责将 OpenAI 兼容的 HTTP 请求转换为 ds_core 内部格式，
@@ -13,6 +11,7 @@ use std::pin::Pin;
 
 use crate::ds_core::{CoreError, DeepSeekCore};
 
+mod models;
 mod request;
 mod response;
 mod types;
@@ -23,22 +22,29 @@ pub type StreamResponse = Pin<Box<dyn Stream<Item = Result<Bytes, OpenAIAdapterE
 /// OpenAI 适配器
 pub struct OpenAIAdapter {
     ds_core: DeepSeekCore,
+    model_types: Vec<String>,
+    model_registry: std::collections::HashMap<String, String>,
 }
 
 impl OpenAIAdapter {
     /// 创建适配器实例
     pub async fn new(config: &crate::config::Config) -> Result<Self, OpenAIAdapterError> {
         let ds_core = DeepSeekCore::new(config).await?;
-        Ok(Self { ds_core })
+        let model_registry = config.deepseek.model_registry();
+        Ok(Self {
+            ds_core,
+            model_types: config.deepseek.model_types.clone(),
+            model_registry,
+        })
     }
 
     /// POST /v1/chat/completions (非流式)
     ///
     /// 底层复用流式接口，将 SSE 流聚合为单个 JSON 对象后返回
     pub async fn chat_completions(&self, body: &[u8]) -> Result<Vec<u8>, OpenAIAdapterError> {
-        let req = request::parse(body)?;
+        let req = request::parse(body, &self.model_registry)?;
         let stream = self.try_chat(req.ds_req).await?;
-        response::aggregate(stream, req.model).await
+        response::aggregate(stream, req.model, req.stop).await
     }
 
     /// POST /v1/chat/completions (流式)
@@ -46,13 +52,14 @@ impl OpenAIAdapter {
         &self,
         body: &[u8],
     ) -> Result<StreamResponse, OpenAIAdapterError> {
-        let req = request::parse(body)?;
+        let req = request::parse(body, &self.model_registry)?;
         let stream = self.try_chat(req.ds_req).await?;
         Ok(response::stream(
             stream,
             req.model,
             req.include_usage,
             req.include_obfuscation,
+            req.stop,
         ))
     }
 
@@ -78,12 +85,17 @@ impl OpenAIAdapter {
 
     /// GET /v1/models
     pub fn list_models(&self) -> Vec<u8> {
-        todo!("[TODO] 实现模型列表")
+        models::list(&self.model_types)
     }
 
     /// GET /v1/models/{model_id}
-    pub fn get_model(&self, _model_id: &str) -> Option<Vec<u8>> {
-        todo!("[TODO] 实现单个模型查询")
+    pub fn get_model(&self, model_id: &str) -> Option<Vec<u8>> {
+        models::get(&self.model_types, model_id)
+    }
+
+    /// 获取 ds_core 账号池状态
+    pub fn account_statuses(&self) -> Vec<crate::ds_core::AccountStatus> {
+        self.ds_core.account_statuses()
     }
 
     /// 优雅关闭

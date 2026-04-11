@@ -194,7 +194,7 @@ where
 mod tests {
     use futures::StreamExt;
 
-    use crate::openai_adapter::response::state::DsFrame;
+    use super::super::state::DsFrame;
 
     use super::*;
 

@@ -10,16 +10,18 @@ use crate::ds_core::ChatRequest;
 use crate::openai_adapter::OpenAIAdapterError;
 use crate::openai_adapter::types::ChatCompletionRequest;
 
-mod model;
 mod normalize;
-pub mod prompt;
-pub mod tools;
+mod prompt;
+mod resolver;
+mod tools;
 
 /// 解析并降级后的请求上下文
 #[derive(Debug)]
 pub struct AdapterRequest {
     pub model: String,
     pub ds_req: ChatRequest,
+    /// 由外部 HTTP server 读取并决定走流式还是非流式 handler
+    #[allow(dead_code)]
     pub stream: bool,
     pub include_usage: bool,
     pub include_obfuscation: bool,
@@ -27,7 +29,10 @@ pub struct AdapterRequest {
 }
 
 /// 解析 JSON 请求体，执行校验、默认值收敛和能力标志解析
-pub fn parse(body: &[u8]) -> Result<AdapterRequest, OpenAIAdapterError> {
+pub fn parse(
+    body: &[u8],
+    registry: &std::collections::HashMap<String, String>,
+) -> Result<AdapterRequest, OpenAIAdapterError> {
     let req: ChatCompletionRequest = serde_json::from_slice(body)
         .map_err(|e| OpenAIAdapterError::BadRequest(format!("bad request: {}", e)))?;
 
@@ -37,7 +42,8 @@ pub fn parse(body: &[u8]) -> Result<AdapterRequest, OpenAIAdapterError> {
 
     let tool_ctx = tools::extract(&req).map_err(OpenAIAdapterError::BadRequest)?;
     let prompt = prompt::build(&req, &tool_ctx);
-    let model_res = model::resolve(
+    let model_res = resolver::resolve(
+        registry,
         &req.model,
         req.reasoning_effort.as_deref(),
         req.web_search_options.as_ref(),
@@ -52,6 +58,7 @@ pub fn parse(body: &[u8]) -> Result<AdapterRequest, OpenAIAdapterError> {
             prompt,
             thinking_enabled: model_res.thinking_enabled,
             search_enabled: model_res.search_enabled,
+            model_type: model_res.model_type,
         },
         stream: norm.stream,
         include_usage: norm.include_usage,
@@ -64,8 +71,12 @@ pub fn parse(body: &[u8]) -> Result<AdapterRequest, OpenAIAdapterError> {
 mod tests {
     use super::*;
 
+    fn default_registry() -> std::collections::HashMap<String, String> {
+        crate::config::DeepSeekConfig::default().model_registry()
+    }
+
     fn parse_json(val: serde_json::Value) -> Result<AdapterRequest, OpenAIAdapterError> {
-        let req = parse(val.to_string().as_bytes())?;
+        let req = parse(val.to_string().as_bytes(), &default_registry())?;
         println!("\n=== PARSED REQUEST ===");
         println!("prompt:\n{}", req.ds_req.prompt);
         println!("adapter: {req:#?}");

@@ -175,6 +175,7 @@ pub struct EditMessagePayload {
     pub prompt: String,
     pub search_enabled: bool,
     pub thinking_enabled: bool,
+    pub model_type: String,
 }
 
 #[derive(Debug, Serialize)]
