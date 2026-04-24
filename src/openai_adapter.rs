@@ -6,7 +6,7 @@
 //! 对外暴露最小接口：OpenAIAdapter, OpenAIAdapterError
 
 use bytes::Bytes;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use std::pin::Pin;
 
 use crate::ds_core::{CoreError, DeepSeekCore};
@@ -113,6 +113,17 @@ impl OpenAIAdapter {
             &self.max_output_tokens,
             model_id,
         )
+    }
+
+    /// 原始 DeepSeek SSE 流（不经 OpenAI 协议转换）
+    ///
+    /// 用于流分析：对比原始响应与 OpenAI 转换后的差异，定位转换 bug
+    pub async fn raw_chat_stream(&self, body: &[u8]) -> Result<StreamResponse, OpenAIAdapterError> {
+        let req = request::parse(body, &self.model_registry)?;
+        let stream = self.try_chat(req.ds_req).await?;
+        Ok(Box::pin(
+            stream.map(|r| r.map_err(OpenAIAdapterError::from)),
+        ))
     }
 
     /// 获取 ds_core 账号池状态

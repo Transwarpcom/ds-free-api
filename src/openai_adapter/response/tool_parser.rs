@@ -50,13 +50,114 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
     i
 }
 
+/// 检查指定位置之前是否处于未闭合的 markdown 代码块中
+fn is_inside_code_fence(xml: &str, tag_pos: usize) -> bool {
+    let before = &xml[..tag_pos];
+    before.matches("```").count() % 2 == 1
+}
+
+/// 修复 JSON 中无效的反斜杠转义序列
+///
+/// JSON 只允许 `\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX`。
+/// 遇到其他 `\X` 时将其修复为 `\\X`。
+fn repair_invalid_backslashes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some(&next)
+                    if matches!(next, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u') =>
+                {
+                    out.push('\\');
+                    out.push(next);
+                    chars.next();
+                }
+                Some(&next) => {
+                    // 无效转义：双写反斜杠
+                    out.push('\\');
+                    out.push('\\');
+                    out.push(next);
+                    chars.next();
+                }
+                None => {
+                    out.push('\\');
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// 修复 JSON 中未加引号的 key（如 `{name: "value"}` → `{"name": "value"}`）
+fn repair_unquoted_keys(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 32);
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        if (chars[i] == '{' || chars[i] == ',') && i + 1 < len {
+            out.push(chars[i]);
+            i += 1;
+            // 跳过空白
+            while i < len && chars[i].is_whitespace() {
+                out.push(chars[i]);
+                i += 1;
+            }
+            // 若后面跟的是一个未被引号括起来的标识符，且紧跟 `:`，则补引号
+            if i < len && (chars[i].is_alphabetic() || chars[i] == '_') {
+                let key_start = i;
+                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                if i < len && chars[i] == ':' {
+                    out.push('"');
+                    out.extend(&chars[key_start..i]);
+                    out.push('"');
+                } else {
+                    out.extend(&chars[key_start..i]);
+                    continue;
+                }
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// 对 JSON 字符串依次尝试修复：无效转义 → 未引号 key，若修复后合法则返回
+fn repair_json(s: &str) -> Option<String> {
+    let step1 = repair_invalid_backslashes(s);
+    if serde_json::from_str::<serde_json::Value>(&step1).is_ok() {
+        return Some(step1);
+    }
+    let step2 = repair_unquoted_keys(&step1);
+    if serde_json::from_str::<serde_json::Value>(&step2).is_ok() {
+        return Some(step2);
+    }
+    None
+}
+
 /// 解析 `<tool_calls>...</tool_calls>` 中的 JSON 数组，返回结构化 ToolCall 列表
 ///
 /// 标签内格式为 JSON 数组：
 /// `<tool_calls>[{"name": "get_weather", "arguments": {"city": "北京"}}]</tool_calls>`
+///
+/// 若内容位于 markdown 代码块内则跳过解析（防误触发）。
+/// 若标准 JSON 解析失败，会尝试宽松修复（无效转义、未引号 key）后重试。
 pub fn parse_tool_calls(xml: &str) -> Option<(Vec<ToolCall>, String)> {
     let start = xml.find(TAG_START)?;
     let after_start = start + TAG_START.len();
+
+    // 跳过 markdown 代码块中的工具示例
+    if is_inside_code_fence(xml, start) {
+        return None;
+    }
 
     // 闭合标签可选：有则截断尾部幻觉，无则取到末尾
     let (end, inner_end) = match xml.find(TAG_END) {
@@ -70,7 +171,14 @@ pub fn parse_tool_calls(xml: &str) -> Option<(Vec<ToolCall>, String)> {
     let arr_end = inner.rfind(']')? + 1;
     let json_str = &inner[arr_start..arr_end];
 
-    let arr: Vec<serde_json::Value> = serde_json::from_str(json_str).ok()?;
+    // 标准解析
+    let arr: Option<Vec<serde_json::Value>> = serde_json::from_str(json_str).ok();
+    // 标准解析失败时尝试宽松修复
+    let arr = arr.or_else(|| {
+        let repaired = repair_json(json_str)?;
+        serde_json::from_str(&repaired).ok()
+    })?;
+
     let mut calls = Vec::new();
     for item in arr {
         let name = item.get("name")?.as_str()?.to_string();
@@ -476,5 +584,137 @@ mod tests {
         assert_eq!(remaining, " trailing text");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.as_ref().unwrap().name, "get_weather");
+    }
+
+    // --- repair_invalid_backslashes ---
+
+    #[test]
+    fn repair_backslashes_passes_valid_escapes() {
+        assert_eq!(
+            repair_invalid_backslashes(r#"hello\nworld"#),
+            r#"hello\nworld"#
+        );
+        assert_eq!(repair_invalid_backslashes(r#"\"quoted\""#), r#"\"quoted\""#);
+        assert_eq!(repair_invalid_backslashes(r#"tab\there"#), r#"tab\there"#);
+        assert_eq!(
+            repair_invalid_backslashes(r#"\\backslash"#),
+            r#"\\backslash"#
+        );
+    }
+
+    #[test]
+    fn repair_backslashes_fixes_invalid_escapes() {
+        let input = r#"C:\Users\name"#;
+        let result = repair_invalid_backslashes(input);
+        // `\U` invalid → `\\U`（多加一个反斜杠），`\n` 是合法转义保持不变
+        assert_eq!(result.len(), input.len() + 1, "应在 \\U 处多一个反斜杠");
+        assert_eq!(result.as_bytes()[2], b'\\');
+        assert_eq!(result.as_bytes()[3], b'\\');
+        assert_eq!(result.as_bytes()[4], b'U');
+    }
+
+    #[test]
+    fn repair_backslashes_keeps_valid_n() {
+        // `\n` 是合法 JSON 转义，保持不变
+        let result = repair_invalid_backslashes(r#"line1\nline2"#);
+        assert_eq!(result, r#"line1\nline2"#);
+    }
+
+    #[test]
+    fn repair_backslashes_mixed_valid_and_invalid() {
+        assert_eq!(
+            repair_invalid_backslashes("line1\nline2\tend\r\n"),
+            "line1\nline2\tend\r\n"
+        );
+    }
+
+    // --- repair_unquoted_keys ---
+
+    #[test]
+    fn repair_unquoted_keys_basic() {
+        let input = r#"{name: "get_weather"}"#;
+        let expected = r#"{"name": "get_weather"}"#;
+        assert_eq!(repair_unquoted_keys(input), expected);
+    }
+
+    #[test]
+    fn repair_unquoted_keys_nested() {
+        let input = r#"{city: "bj", extra: {a: 1}}"#;
+        let expected = r#"{"city": "bj", "extra": {"a": 1}}"#;
+        assert_eq!(repair_unquoted_keys(input), expected);
+    }
+
+    #[test]
+    fn repair_unquoted_keys_array() {
+        let input = r#"[{name: "f", arguments: {}}]"#;
+        let expected = r#"[{"name": "f", "arguments": {}}]"#;
+        assert_eq!(repair_unquoted_keys(input), expected);
+    }
+
+    #[test]
+    fn repair_unquoted_keys_quoted_keys_untouched() {
+        let input = r#"{"name": "f", "args": {"city": "bj"}}"#;
+        assert_eq!(repair_unquoted_keys(input), input);
+    }
+
+    // --- parse_tool_calls with repair ---
+
+    #[test]
+    fn parse_tool_calls_with_unquoted_keys() {
+        let xml = r#"<tool_calls>[{name: "get_weather", arguments: {city: "北京"}}]</tool_calls>"#;
+        let (calls, _) = parse_tool_calls(xml).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.as_ref().unwrap().name, "get_weather");
+    }
+
+    #[test]
+    fn parse_tool_calls_with_invalid_backslashes() {
+        let xml = r#"<tool_calls>[{"name": "read_file", "arguments": {"path": "C:\Users\name"}}]</tool_calls>"#;
+        let (calls, _) = parse_tool_calls(xml).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.as_ref().unwrap().name, "read_file");
+    }
+
+    #[test]
+    fn parse_tool_calls_with_both_repairs() {
+        // unquoted keys + invalid backslashes 同时出现
+        let xml = r#"<tool_calls>[{name: "read_file", arguments: {path: "C:\file"}}]</tool_calls>"#;
+        let (calls, _) = parse_tool_calls(xml).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.as_ref().unwrap().name, "read_file");
+    }
+
+    // --- code fence ---
+
+    #[test]
+    fn parse_tool_calls_inside_code_fence_skipped() {
+        // 模型在 markdown 代码块中展示工具调用示例
+        let xml = "示例：\n```json\n<tool_calls>[{\"name\": \"get_weather\", \"arguments\": {}}]</tool_calls>\n```";
+        assert!(parse_tool_calls(xml).is_none());
+    }
+
+    #[test]
+    fn parse_tool_calls_not_inside_code_fence() {
+        // 正常工具调用，不在代码块内
+        let xml = r#"<tool_calls>[{"name": "get_weather", "arguments": {}}]</tool_calls>"#;
+        assert!(parse_tool_calls(xml).is_some());
+    }
+
+    #[test]
+    fn parse_tool_calls_tool_call_inside_value_not_skipped() {
+        // 工具调用中包含代码块标记作为参数值，不应跳过
+        let xml = r#"<tool_calls>[{"name": "format_code", "arguments": {"code": "```rust\nfn main() {}\n```"}}]</tool_calls>"#;
+        let (calls, _) = parse_tool_calls(xml).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.as_ref().unwrap().name, "format_code");
+    }
+
+    // --- is_inside_code_fence ---
+
+    #[test]
+    fn code_fence_detection() {
+        assert!(!is_inside_code_fence("普通文本", 0));
+        assert!(is_inside_code_fence("```\n<tool_calls>", 5));
+        assert!(!is_inside_code_fence("```\ncode\n```\n<tool_calls>", 17));
     }
 }

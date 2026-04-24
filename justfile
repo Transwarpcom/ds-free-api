@@ -11,9 +11,10 @@ check:
   cargo audit
   cargo machete
 
-# Run ds_core_cli example
-ds-core-cli *ARGS:
-  cargo run --example ds_core_cli -- "$@"
+# Run unified protocol debug CLI (replaces ds-core-cli / openai-adapter-cli)
+# 默认使用 py-e2e-tests/config.toml，可通过 -c <path> 覆盖
+adapter-cli *ARGS:
+  cargo run --example adapter_cli -- -c py-e2e-tests/config.toml "$@"
 
 # Run openai_adapter/request submodule tests
 test-adapter-request *ARGS:
@@ -22,10 +23,6 @@ test-adapter-request *ARGS:
 # Run openai_adapter/response submodule tests
 test-adapter-response *ARGS:
   cargo test openai_adapter::response -- "$@"
-
-# Run openai_adapter_cli example
-openai-adapter-cli *ARGS:
-  cargo run --example openai_adapter_cli -- "$@"
 
 # Run HTTP server
 serve *ARGS:

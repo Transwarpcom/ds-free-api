@@ -4,7 +4,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::time::SystemTime;
 
 use crate::config::Account as AccountConfig;
 use crate::ds_core::client::{
@@ -26,6 +27,8 @@ pub struct Account {
     mobile: String,
     sessions: HashMap<String, String>,
     is_busy: AtomicBool,
+    /// 账号最近一次释放的时间戳（ms），用于冷却判断
+    last_released: AtomicI64,
 }
 
 impl Account {
@@ -56,12 +59,16 @@ impl AccountGuard {
 impl Drop for AccountGuard {
     fn drop(&mut self) {
         self.account.is_busy.store(false, Ordering::Relaxed);
+        let now_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        self.account.last_released.store(now_ms, Ordering::Relaxed);
     }
 }
 
 pub struct AccountPool {
     accounts: Vec<Arc<Account>>,
-    index: AtomicUsize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -87,7 +94,6 @@ impl AccountPool {
     pub fn new() -> Self {
         Self {
             accounts: Vec::new(),
-            index: AtomicUsize::new(0),
         }
     }
 
@@ -137,30 +143,42 @@ impl AccountPool {
         Ok(())
     }
 
-    /// 轮询获取一个空闲的账号（必须拥有指定 model_type 的 session）
+    /// 获取空闲最久的可用账号（必须拥有指定 model_type 的 session）
+    ///
+    /// 遍历所有账号，选冷却已过且空闲时间最长的那个，最大化每次使用间隔。
     pub fn get_account(&self, model_type: &str) -> Option<AccountGuard> {
         if self.accounts.is_empty() {
             return None;
         }
 
-        let idx = self.index.fetch_add(1, Ordering::Relaxed) % self.accounts.len();
+        let now_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
 
-        for i in 0..self.accounts.len() {
-            let account = &self.accounts[(idx + i) % self.accounts.len()];
-            if account.session_id(model_type).is_some()
-                && !account.is_busy()
-                && account
-                    .is_busy
-                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-            {
-                return Some(AccountGuard {
-                    account: account.clone(),
-                });
+        let mut best_idx: Option<usize> = None;
+        let mut best_idle = i64::MIN;
+
+        for (i, account) in self.accounts.iter().enumerate() {
+            if account.session_id(model_type).is_none() || account.is_busy() {
+                continue;
+            }
+            let idle = now_ms - account.last_released.load(Ordering::Relaxed);
+            if idle > best_idle {
+                best_idle = idle;
+                best_idx = Some(i);
             }
         }
 
-        None
+        let idx = best_idx?;
+        let account = &self.accounts[idx];
+        account
+            .is_busy
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .ok()?;
+        Some(AccountGuard {
+            account: Arc::clone(account),
+        })
     }
 
     /// 获取所有账号的详细状态
@@ -297,6 +315,7 @@ async fn try_init_account(
         mobile: creds.mobile.clone(),
         sessions,
         is_busy: AtomicBool::new(false),
+        last_released: AtomicI64::new(0),
     })
 }
 

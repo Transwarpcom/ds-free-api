@@ -1,15 +1,19 @@
-//! openai_adapter 交互式 CLI 测试工具
+//! 统一协议调试 CLI
+//!
+//! 接受 OpenAI JSON 请求体，支持输出原始 DeepSeek SSE、转换后的 OpenAI SSE 或两者对照。
 //!
 //! 使用方式:
-//!   交互模式: cargo run --example openai_adapter_cli
-//!   脚本模式: cargo run --example openai_adapter_cli -- source examples/openai_adapter_cli-script.txt
+//!   交互模式: cargo run --example adapter_cli
+//!   脚本模式: cargo run --example adapter_cli -- source examples/adapter_cli-script.txt
 //!
 //! 命令:
-//!   chat <json_file> [--raw]               - 读取标准 OpenAI JSON body，内部按 stream 字段路由
-//!   concurrent <n> <json_file> [--raw]     - 并发 chat
+//!   chat <json_file>                       - OpenAI 转换后输出
+//!   raw <json_file>                        - 原始 DeepSeek SSE（转换前）
+//!   compare <json_file>                    - 上下对照两种流
+//!   concurrent <n> <json_file>             - 并发请求
 //!   models                                 - 列出可用模型
 //!   model <id>                             - 查询单个模型
-//!   status                                 - 查看 ds_core 账号池状态
+//!   status                                 - 查看账号池状态
 //!   source <file>                          - 从文件读取命令执行
 //!   quit | exit                            - 退出并清理
 
@@ -19,12 +23,9 @@ use futures::{StreamExt, future::join_all};
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-/// 读取一行输入，允许无效的 UTF-8
 fn read_line_lossy() -> io::Result<String> {
     let mut buf = Vec::new();
-    let stdin = io::stdin();
-    let mut handle = stdin.lock();
-
+    let mut handle = io::stdin().lock();
     loop {
         let mut byte = [0u8; 1];
         match handle.read(&mut byte) {
@@ -40,7 +41,6 @@ fn read_line_lossy() -> io::Result<String> {
             Err(e) => return Err(e),
         }
     }
-
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
     println!("[初始化中...]");
     let adapter = OpenAIAdapter::new(&config).await?;
     println!(
-        "[就绪] 命令: chat <json> [--raw] | concurrent <n> <json> [--raw] | models | model | status | source | quit"
+        "[就绪] 命令: chat | raw | compare | concurrent | models | model | status | source | quit"
     );
 
     let mut stdout = io::stdout();
@@ -79,7 +79,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 解析命令行参数，提取位置参数和 --raw flag
 fn parse_args<'a>(parts: &'a [&'a str]) -> (Vec<&'a str>, bool) {
     let raw = parts.iter().any(|p| *p == "--raw" || *p == "-r");
     let positional: Vec<_> = parts
@@ -108,17 +107,49 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
         }
 
         "chat" if parts.len() >= 2 => {
-            let (positional, raw) = parse_args(&parts);
-            let file = positional[1];
-            if !Path::new(file).exists() {
-                eprintln!("[错误] 文件不存在: {}", file);
-                return Ok(false);
-            }
-            let body = std::fs::read_to_string(file)?;
-            println!(">>> 请求: {}", file);
-            if let Err(e) = run_chat(adapter, body.as_bytes(), raw).await {
-                eprintln!("[请求失败] {}", e);
-            }
+            let file = parts[1];
+            let body = load_json(file)?;
+            println!(">>> chat: {}", file);
+            let mut stream = adapter.chat_completions_stream(&body).await?;
+            print_stream(&mut stream, false).await;
+        }
+
+        "raw" if parts.len() >= 2 => {
+            let file = parts[1];
+            let body = load_json(file)?;
+            println!(">>> raw: {}", file);
+            let mut stream = adapter.raw_chat_stream(&body).await?;
+            print_stream(&mut stream, true).await;
+        }
+
+        "compare" if parts.len() >= 2 => {
+            let file = parts[1];
+            let body = load_json(file)?;
+            println!(">>> compare: {}", file);
+
+            // 原始流
+            println!("\n═══ RAW DEEPSEEK SSE ═══════════════════════════════════════");
+            let raw_stream = adapter.raw_chat_stream(&body).await?;
+            consume_stream(raw_stream, |bytes| {
+                let text = String::from_utf8_lossy(&bytes);
+                for line in text.lines() {
+                    println!("  {}", line);
+                }
+            })
+            .await;
+
+            // 转换后流
+            println!("\n═══ CONVERTED OPENAI SSE ═══════════════════════════════════");
+            let converted_stream = adapter.chat_completions_stream(&body).await?;
+            consume_stream(converted_stream, |bytes| {
+                let text = String::from_utf8_lossy(&bytes);
+                for line in text.lines() {
+                    println!("  {}", line);
+                }
+            })
+            .await;
+
+            println!("\n═══ END ════════════════════════════════════════════════════");
         }
 
         "concurrent" if parts.len() >= 3 => {
@@ -131,12 +162,8 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
                 }
             };
             let file = positional[2];
-            if !Path::new(file).exists() {
-                eprintln!("[错误] 文件不存在: {}", file);
-                return Ok(false);
-            }
-            let body = std::fs::read_to_string(file)?;
-            println!(">>> 并发请求: count={}, file={}", count, file);
+            let body = load_json(file)?;
+            println!(">>> concurrent: count={}, file={}", count, file);
             run_concurrent(adapter, count, body, raw).await;
         }
 
@@ -181,7 +208,7 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
 
         _ => {
             println!(
-                "[未知命令: {}] 可用: chat | concurrent | models | model | status | source | quit",
+                "[未知命令: {}] 可用: chat | raw | compare | concurrent | models | model | status | source | quit",
                 cmd
             );
         }
@@ -190,78 +217,32 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
     Ok(false)
 }
 
-/// 判断请求体是否要求流式
-fn is_stream(body: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
-        .unwrap_or(false)
+fn load_json(file: &str) -> anyhow::Result<Vec<u8>> {
+    let path = Path::new(file);
+    if !path.exists() {
+        anyhow::bail!("文件不存在: {}", file);
+    }
+    Ok(std::fs::read(path)?)
 }
 
-/// 执行单次 chat，根据 stream 字段路由，raw 控制输出格式
-async fn run_chat(adapter: &OpenAIAdapter, body: &[u8], raw: bool) -> anyhow::Result<()> {
-    if is_stream(body) {
-        let mut stream = adapter.chat_completions_stream(body).await?;
-        print_stream(&mut stream, raw).await;
-    } else {
-        let json = adapter.chat_completions(body).await?;
-        if raw {
-            println!("{}", String::from_utf8_lossy(&json));
-        } else {
-            print_chat_summary(&json);
+/// 消费流并给每个 chunk 应用处理函数
+async fn consume_stream<F>(stream: StreamResponse, mut f: F)
+where
+    F: FnMut(Bytes),
+{
+    let mut stream = stream;
+    while let Some(res) = stream.next().await {
+        match res {
+            Ok(bytes) => f(bytes),
+            Err(e) => {
+                eprintln!("\n[流错误] {}", e);
+                break;
+            }
         }
     }
-    Ok(())
 }
 
-/// 打印非流式响应的简化摘要
-fn print_chat_summary(json: &[u8]) {
-    let v: serde_json::Value = match serde_json::from_slice(json) {
-        Ok(val) => val,
-        Err(_) => {
-            println!("{}", String::from_utf8_lossy(json));
-            return;
-        }
-    };
-
-    let choice = v.get("choices").and_then(|c| c.get(0));
-    let message = choice.and_then(|c| c.get("message"));
-    let content = message
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str());
-    let reasoning = message
-        .and_then(|m| m.get("reasoning_content"))
-        .and_then(|c| c.as_str());
-    let tool_calls = message.and_then(|m| m.get("tool_calls"));
-    let finish = choice
-        .and_then(|c| c.get("finish_reason"))
-        .and_then(|f| f.as_str());
-    let usage = v.get("usage");
-
-    let mut summary = serde_json::Map::new();
-    if let Some(c) = content {
-        summary.insert("content".into(), c.into());
-    }
-    if let Some(r) = reasoning {
-        summary.insert("reasoning_content".into(), r.into());
-    }
-    if let Some(t) = tool_calls {
-        summary.insert("tool_calls".into(), t.clone());
-    }
-    if let Some(f) = finish {
-        summary.insert("finish_reason".into(), f.into());
-    }
-    if let Some(u) = usage {
-        summary.insert("usage".into(), u.clone());
-    }
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&summary).unwrap_or_default()
-    );
-}
-
-/// 消费流式响应，raw 控制输出格式
+/// 打印流式响应
 async fn print_stream(stream: &mut StreamResponse, raw: bool) {
     let mut stdout = io::stdout();
     while let Some(res) = stream.next().await {
@@ -285,7 +266,7 @@ async fn print_stream(stream: &mut StreamResponse, raw: bool) {
     }
 }
 
-/// 打印单个流式 chunk 的简化摘要
+/// 打印单个转换后 chunk 的摘要
 fn print_stream_chunk(bytes: &Bytes) {
     let text = String::from_utf8_lossy(bytes);
     let json_str = text
@@ -315,7 +296,6 @@ fn print_stream_chunk(bytes: &Bytes) {
         .and_then(|f| f.as_str());
     let usage = v.get("usage");
 
-    // usage chunk（空 choices）单独处理
     if choice.is_none() || usage.is_some() {
         if let Some(u) = usage {
             println!("[usage] {}", u);
@@ -346,14 +326,13 @@ fn print_stream_chunk(bytes: &Bytes) {
 }
 
 /// 执行并发请求
-async fn run_concurrent(adapter: &OpenAIAdapter, count: usize, body_template: String, raw: bool) {
+async fn run_concurrent(adapter: &OpenAIAdapter, count: usize, body: Vec<u8>, raw: bool) {
     let start = std::time::Instant::now();
-    let body_bytes = body_template.into_bytes();
-    let is_streaming = is_stream(&body_bytes);
+    let is_streaming = is_stream(&body);
 
     let futures: Vec<_> = (0..count)
         .map(|i| {
-            let body = body_bytes.clone();
+            let body = body.clone();
             async move {
                 let req_start = std::time::Instant::now();
                 let result = if is_streaming {
@@ -477,4 +456,12 @@ async fn run_concurrent(adapter: &OpenAIAdapter, count: usize, body_template: St
         "  总计: {}/{} 成功 | 总耗时 {:?}",
         success_count, count, total_elapsed
     );
+}
+
+/// 判断请求体是否要求流式
+fn is_stream(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
+        .unwrap_or(false)
 }

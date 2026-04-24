@@ -53,7 +53,9 @@ Copy `config.example.toml` to `config.toml` in the same directory as the executa
 RUST_LOG=debug ./ds-free-api
 ```
 
-Required fields only. One account = one concurrency slot (seems max 2 concurrent).
+Required fields only. One account = one concurrency slot.
+
+> **Concurrency tip**: DeepSeek has an implicit rate limit per session — each request needs about one request cycle of rest before the next use. **Stable safe concurrency ≈ accounts ÷ 2** (e.g., 4 accounts → 2 concurrent). Exceeding this ratio may cause empty responses due to rate limiting.
 
 ```toml
 [server]

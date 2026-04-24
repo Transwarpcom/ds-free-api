@@ -84,8 +84,9 @@ src/
 ```
 
 **Additional files not in src/**:
+- `config.example.toml` — authoritative configuration reference (all fields documented with examples)
+- `examples/adapter_cli.rs` + `examples/adapter_cli-script.txt` — unified protocol debug CLI (chat/raw/compare/concurrent)
 - `examples/openai_adapter_cli/` — JSON request samples (basic_chat, reasoning_search, stop_sequence, stream_options, tool_call)
-- `examples/*-script.txt` — Scripted input for CLI examples
 - `py-e2e-tests/` — Python e2e test suite using pytest + uv:
   - `openai_endpoint/` — OpenAI-compatible `/v1/chat/completions` tests
   - `anthropic_endpoint/` — Anthropic-compatible `/v1/messages` tests
@@ -104,7 +105,7 @@ This means the file tree does not directly map to the public API. To understand 
 ### Binary / Library Split
 
 - `main.rs` is a thin binary wrapper (~10 lines): init `env_logger`, parse CLI args, load config, call `server::run()`
-- `lib.rs` defines the public API surface: `Config`, `DeepSeekCore`, `OpenAIAdapter`, `AnthropicCompat`, `StreamResponse`, etc.
+- `lib.rs` defines the public API surface: `Config`, `DeepSeekCore`, `CoreError`, `ChatRequest`, `AccountStatus`, `OpenAIAdapter`, `OpenAIAdapterError`, `StreamResponse`, `AnthropicCompat`
 - The crate can be built as both a library (`cargo build --lib`) and a binary (`cargo build --bin ds-free-api`)
 
 ### StreamResponse Type
