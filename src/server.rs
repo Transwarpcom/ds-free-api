@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
@@ -89,13 +90,10 @@ async fn auth_middleware(req: Request, next: Next, tokens: Vec<String>) -> Respo
     let valid = match auth_header {
         Some(header) if header.starts_with("Bearer ") => {
             let token = header.strip_prefix("Bearer ").unwrap_or("");
-            tokens.iter().any(|t| {
-                if t.len() != token.len() {
-                    false
-                } else {
-                    t.as_bytes().ct_eq(token.as_bytes()).into()
-                }
-            })
+            let token_hash = Sha256::digest(token.as_bytes());
+            tokens
+                .iter()
+                .any(|t| Sha256::digest(t.as_bytes()).ct_eq(&token_hash).into())
         }
         _ => false,
     };
