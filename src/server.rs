@@ -77,6 +77,8 @@ fn build_router(state: AppState, api_tokens: &[crate::config::ApiToken]) -> Rout
         }));
     }
 
+    router = router.layer(middleware::from_fn(security_headers_middleware));
+
     router
 }
 
@@ -104,6 +106,23 @@ async fn auth_middleware(req: Request, next: Next, tokens: Vec<String>) -> Respo
     }
 
     next.run(req).await
+}
+
+/// 安全头中间件 —— 添加常见的安全相关响应头
+async fn security_headers_middleware(req: Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+
+    // 防御 MIME 类型嗅探
+    headers.insert(axum::http::header::X_CONTENT_TYPE_OPTIONS, axum::http::HeaderValue::from_static("nosniff"));
+    // 防止点击劫持
+    headers.insert(axum::http::header::X_FRAME_OPTIONS, axum::http::HeaderValue::from_static("DENY"));
+    // XSS 保护
+    headers.insert(axum::http::header::X_XSS_PROTECTION, axum::http::HeaderValue::from_static("1; mode=block"));
+    // 强制 HTTPS（如果适用）
+    headers.insert(axum::http::header::STRICT_TRANSPORT_SECURITY, axum::http::HeaderValue::from_static("max-age=31536000; includeSubDomains"));
+
+    response
 }
 
 /// 优雅关闭信号
