@@ -199,8 +199,12 @@ impl DsClient {
         client_version: String,
         client_platform: String,
     ) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
-            http: reqwest::Client::new(),
+            http,
             api_base,
             wasm_url,
             user_agent,
